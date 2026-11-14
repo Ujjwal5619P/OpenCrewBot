@@ -1,6 +1,33 @@
 // Types shared by the server and the browser. Everything here is plain JSON.
 
-export type ApprovalMode = "ask" | "full";
+export type ApprovalMode = "ask" | "controlled" | "full";
+
+export type ApprovalRequestStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "cancelled"
+  | "expired"
+  | "failed"
+  | "outcome_unknown";
+
+export interface ApprovalRequest {
+  id: string;
+  conversationId: ConversationId;
+  botId: string;
+  messageId: string;
+  toolCallId: string;
+  toolName: string;
+  action: string;
+  details: string;
+  status: ApprovalRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt?: string;
+  decisionBy?: string;
+  executionId?: string;
+  taskId?: string;
+}
 
 export interface BotTools {
   /** Tavily search, extract and crawl. */
@@ -30,6 +57,8 @@ export interface Bot {
   /** Connection ids this bot may use: `composio:<toolkit>` or `mcp:<serverId>`. */
   connections: string[];
   approval: ApprovalMode;
+  /** Exact registered tool IDs that Controlled Access may auto-approve, subject to sensitive-action checks. */
+  approvalPermissions?: string[];
   pinned: boolean;
   createdAt: string;
 }
@@ -82,7 +111,7 @@ export interface Source {
   url: string;
 }
 
-export type ToolStatus = "running" | "awaiting-approval" | "done" | "error" | "denied";
+export type ToolStatus = "running" | "awaiting-approval" | "done" | "error" | "denied" | "outcome_unknown";
 
 export type Part =
   | { kind: "text"; text: string }

@@ -8,11 +8,31 @@ import type { MastraBrowser } from "@mastra/core/browser";
 import { LibSQLStore } from "@mastra/libsql";
 import { Memory } from "@mastra/memory";
 import { randomUUID } from "node:crypto";
-import type { Bot, ChatMessage, ConversationId, Part, RouteNote } from "@/lib/shared/types";
+import type { ApprovalRequest, Bot, ChatMessage, ConversationId, Part, RouteNote } from "@/lib/shared/types";
 import { MASTRA_DB_URL, OWNER_ID, isMock } from "./config";
-import { conversationGeneration, getBot, saveMessage } from "./db";
+import {
+  cancelPendingApprovalRequests,
+  cancelApprovalRequest,
+  createApprovalRequest,
+  decideApprovalRequest,
+  failApprovalResume,
+  getApprovalRequest,
+  markApprovalOutcomeUnknown,
+  conversationGeneration,
+  getBot,
+  saveMessage,
+} from "./db";
 import { projectMemoryThreadId } from "./project-memory";
+import {
+  APPROVAL_REQUEST_TTL_MS,
+  approvalActionLabel,
+  approvalDetails,
+  approvalPolicyForTool,
+  executionTaskForConversation,
+  safeApprovalText,
+} from "./approval-core";
 import { publish } from "./bus";
+import { InputError } from "./errors";
 import { costUsd, findModel } from "./models";
 import { createMockModel } from "./mock-model";
 import { announceLiveView, createSession, releaseSession } from "./browserbase";
@@ -28,6 +48,7 @@ interface BotRuntime {
   /** The latest saved bot; the system prompt reads it on every model call. */
   holder: { bot: Bot };
   controller: AgentController;
+  toolNames: Set<string>;
   ready: Promise<void>;
   /** Disconnects the bot's MCP servers. */
   closeConnectors: () => Promise<void>;
@@ -76,6 +97,7 @@ async function signatureOf(bot: Bot): Promise<string> {
   return JSON.stringify({
     tools: bot.tools,
     approval: bot.approval,
+    approvalPermissions: bot.approvalPermissions ?? [],
     connections: bot.connections,
     connectionsVersion: bot.connections.length ? await connectionsVersion() : 0,
     mock: isMock(),
@@ -103,13 +125,14 @@ async function buildRuntime(bot: Bot): Promise<BotRuntime> {
   const memory = new Memory({ storage: state.storage, options: { lastMessages: 40 } });
   const builtIn = buildTools(bot);
   const connectors = await buildConnectorTools(bot, `bot-${bot.id}-${Date.now()}`);
+  const tools = { ...connectors.tools, ...builtIn.tools };
   const capabilities = [...builtIn.capabilities, ...connectors.capabilities];
   const agent = new Agent({
     id: `bot-${bot.id}`,
     name: bot.name,
     instructions: () => systemPrompt(holder.bot, capabilities, builtIn.instructions),
     model: isMock() ? createMockModel(bot.name) : () => `nebius/${holder.bot.model}`,
-    tools: { ...connectors.tools, ...builtIn.tools },
+    tools,
     memory,
   });
   const browser = await createBrowser(bot);
@@ -130,7 +153,14 @@ async function buildRuntime(bot: Bot): Promise<BotRuntime> {
       ...(bot.tools.askUser ? [] : (["ask_user"] as const)),
     ],
   });
-  return { signature: await signatureOf(bot), holder, controller, ready: controller.init(), closeConnectors: connectors.close };
+  return {
+    signature: await signatureOf(bot),
+    holder,
+    controller,
+    toolNames: new Set(Object.keys(tools)),
+    ready: controller.init(),
+    closeConnectors: connectors.close,
+  };
 }
 
 function isBotBusy(botId: string): boolean {
@@ -171,12 +201,21 @@ async function sessionFor(bot: Bot, conversationId: ConversationId): Promise<Ses
   const cached = state.sessions.get(k);
   if (cached && cached.thread.getId() === threadId) return cached;
   const session = await runtime.controller.createSession({ resourceId: OWNER_ID, scope: conversationId, threadId });
-  await session.permissions.setForCategory({ category: "read", policy: "allow" });
-  await session.permissions.setForCategory({ category: "edit", policy: "allow" });
-  await session.permissions.setForCategory({ category: "other", policy: "allow" });
-  // Connected apps and MCP servers act on real accounts: ask first unless the bot has full access.
-  await session.permissions.setForCategory({ category: "mcp", policy: bot.approval === "full" ? "allow" : "ask" });
-  await session.permissions.setForCategory({ category: "execute", policy: bot.approval === "full" ? "allow" : "ask" });
+  const categories = ["read", "edit", "execute", "mcp", "other"] as const;
+  for (const category of categories) {
+    const policy = bot.approval === "full"
+      ? "allow"
+      : category === "read" || (category === "edit" && bot.approval === "ask")
+        ? "allow"
+        : "ask";
+    await session.permissions.setForCategory({ category, policy });
+  }
+  for (const toolName of runtime.toolNames) {
+    await session.permissions.setForTool({
+      toolName,
+      policy: approvalPolicyForTool(bot.approval, bot.approvalPermissions ?? [], toolName, toolCategory(toolName) ?? "other"),
+    });
+  }
   state.sessions.set(k, session);
   return session;
 }
@@ -266,7 +305,7 @@ class TurnFolder {
     );
   }
 
-  handle(event: AgentControllerEvent) {
+  async handle(event: AgentControllerEvent) {
     if (this.finished) return;
     switch (event.type) {
       case "message_update": {
@@ -277,20 +316,49 @@ class TurnFolder {
       case "tool_start": {
         if (event.toolName === "ask_user" || this.toolPart.has(event.toolCallId)) break;
         const { label, detail } = toolLabel(event.toolName, event.args);
-        this.message.parts.push({ kind: "tool", toolCallId: event.toolCallId, name: event.toolName, label, detail, status: "running" });
+        this.message.parts.push({
+          kind: "tool",
+          toolCallId: event.toolCallId,
+          name: event.toolName,
+          label: safeApprovalText(label),
+          detail: detail ? safeApprovalText(detail) : undefined,
+          status: "running",
+        });
         this.toolPart.set(event.toolCallId, this.message.parts.length - 1);
         this.emit(true);
         break;
       }
       case "tool_approval_required": {
         let part = this.tool(event.toolCallId);
+        const { label, detail } = toolLabel(event.toolName, event.args);
         if (!part) {
-          const { label, detail } = toolLabel(event.toolName, event.args);
-          this.message.parts.push({ kind: "tool", toolCallId: event.toolCallId, name: event.toolName, label, detail, status: "awaiting-approval" });
+          this.message.parts.push({
+            kind: "tool",
+            toolCallId: event.toolCallId,
+            name: event.toolName,
+            label: safeApprovalText(label),
+            detail: detail ? safeApprovalText(detail) : undefined,
+            status: "awaiting-approval",
+          });
           this.toolPart.set(event.toolCallId, this.message.parts.length - 1);
           part = this.tool(event.toolCallId);
         }
         part!.status = "awaiting-approval";
+        const request: ApprovalRequest = {
+          id: randomUUID(),
+          conversationId: this.message.conversationId,
+          botId: this.message.botId!,
+          messageId: this.message.id,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          action: approvalActionLabel(label, detail),
+          details: approvalDetails(event.args),
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + APPROVAL_REQUEST_TTL_MS).toISOString(),
+          ...executionTaskForConversation(this.message.conversationId),
+        };
+        await createApprovalRequest(request);
         this.emit(true);
         break;
       }
@@ -349,6 +417,22 @@ class TurnFolder {
     this.emit(true);
   }
 
+  approvalOutcomeUnknown(toolCallId: string) {
+    const part = this.tool(toolCallId);
+    if (!part) return;
+    part.status = "outcome_unknown";
+    this.emit(true);
+  }
+
+  waitingForApproval(toolCallId: string): boolean {
+    return this.tool(toolCallId)?.status === "awaiting-approval";
+  }
+
+  failApprovalPersistence(toolCallId: string) {
+    this.approval(toolCallId, false);
+    void this.finish("error", "The approval request could not be saved, so the action was not allowed.");
+  }
+
   async finish(status: ChatMessage["status"], error?: string) {
     if (this.finished) return;
     this.finished = true;
@@ -359,6 +443,18 @@ class TurnFolder {
     this.message.status = status;
     for (const p of this.message.parts) {
       if (p.kind === "tool" && (p.status === "running" || p.status === "awaiting-approval")) {
+        if (p.status === "awaiting-approval" && this.message.botId) {
+          try {
+            await cancelApprovalRequest(
+              this.message.conversationId,
+              this.message.botId,
+              p.toolCallId,
+              status === "stopped" ? "turn-stopped" : "turn-finished",
+            );
+          } catch (error) {
+            console.error("[opencrewbot] Could not close a pending approval.", error);
+          }
+        }
         p.status = status === "stopped" ? "denied" : "error";
       }
     }
@@ -418,8 +514,25 @@ async function executeTurn({ bot, conversationId, content, route, onProgress }: 
   let unsubscribe: (() => void) | undefined;
   try {
     const session = await sessionFor(latest, conversationId);
-    unsubscribe = session.subscribe((event) => folder.handle(event));
+    let eventQueue = Promise.resolve();
+    unsubscribe = session.subscribe((event) => {
+      eventQueue = eventQueue.then(() => folder.handle(event)).catch(async (error) => {
+        console.error("[opencrewbot] Could not process an agent event.", error);
+        if (event.type === "tool_approval_required") {
+          folder.failApprovalPersistence(event.toolCallId);
+          try {
+            await session.respondToToolApproval({ toolCallId: event.toolCallId, decision: "decline" });
+          } catch (declineError) {
+            console.error("[opencrewbot] Could not safely decline an unpersisted approval.", declineError);
+            session.abort();
+          }
+        } else {
+          await folder.finish("error", "The agent event could not be saved.");
+        }
+      });
+    });
     await session.sendMessage({ content });
+    await eventQueue;
     // The run settled. If no terminal event reached us and nothing waits on the
     // person, close the turn here so it never hangs as "streaming".
     if (!folder.finished && !folder.waitingOnPerson()) await folder.finish("done");
@@ -437,14 +550,60 @@ async function executeTurn({ bot, conversationId, content, route, onProgress }: 
 export async function respondToApproval(conversationId: ConversationId, botId: string, toolCallId: string, approve: boolean) {
   const k = key(conversationId, botId);
   const session = state.sessions.get(k);
-  if (!session) throw new Error("That request is no longer waiting. The bot may have restarted.");
   const folder = state.folders.get(k);
-  folder?.approval(toolCallId, approve);
+  const request = await getApprovalRequest(conversationId, botId, toolCallId);
+  if (!request) throw new InputError("That approval request does not exist.");
+  if (request.status !== "pending") throw new InputError(`That request is already ${request.status}.`);
+  if (!session || !folder || !folder.waitingForApproval(toolCallId)) {
+    await cancelApprovalRequest(conversationId, botId, toolCallId, "inactive-request");
+    throw new InputError("That request is no longer active and cannot be approved.");
+  }
+  const result = await decideApprovalRequest(conversationId, botId, toolCallId, approve);
+  if (result.reason) {
+    throw new InputError(
+      result.reason === "expired"
+        ? "That approval request has expired."
+        : result.reason === "cancelled"
+          ? "That approval request was cancelled."
+          : result.reason === "not_found"
+            ? "That approval request does not exist."
+            : "That approval request has already been decided.",
+    );
+  }
+  folder.approval(toolCallId, approve);
+  let resumed: Awaited<ReturnType<Session["respondToToolApproval"]>>;
   try {
-    await session.respondToToolApproval({ toolCallId, decision: approve ? "approve" : "decline" });
+    resumed = await session.respondToToolApproval({ toolCallId, decision: approve ? "approve" : "decline" });
   } catch (error) {
-    folder?.approval(toolCallId, undefined);
-    throw error;
+    console.error("[opencrewbot] Mastra failed while resuming an approval.", error);
+    if (approve) {
+      try {
+        await markApprovalOutcomeUnknown(conversationId, botId, toolCallId);
+      } catch (persistenceError) {
+        console.error("[opencrewbot] Could not persist the unknown approval outcome.", persistenceError);
+      }
+      folder.approvalOutcomeUnknown(toolCallId);
+    } else {
+      folder.approval(toolCallId, false);
+    }
+    try {
+      session.abort();
+    } catch (abortError) {
+      console.error("[opencrewbot] Could not abort the failed approval flow.", abortError);
+    }
+    await folder.finish(
+      "error",
+      approve
+        ? "The action may have run, but its outcome could not be confirmed. Reconcile before retrying."
+        : "The action was rejected and was not run.",
+    );
+    throw new Error("The approval flow could not be resumed.");
+  }
+  if (!resumed.accepted) {
+    await failApprovalResume(conversationId, botId, toolCallId);
+    folder.approval(toolCallId, false);
+    await folder.finish("error", "The action could not be resumed, so it was not run.");
+    throw new InputError("That approval request could not be resumed; the action was not run.");
   }
 }
 
@@ -458,6 +617,7 @@ export async function answerQuestion(conversationId: ConversationId, botId: stri
 
 export async function stopConversation(conversationId: ConversationId) {
   state.stopEpoch.set(conversationId, (state.stopEpoch.get(conversationId) ?? 0) + 1);
+  await cancelPendingApprovalRequests("conversation-stopped", conversationId);
   for (const [k, session] of state.sessions) {
     if (!k.startsWith(`${conversationId}|`)) continue;
     const folder = state.folders.get(k);

@@ -310,6 +310,31 @@ test("tracks approval and question waits and resumes the task after a response",
   assert.equal(task.inputRequest, undefined);
 });
 
+test("marks a task outcome unknown when an approved tool cannot be resumed", () => {
+  const task = makeTask("unknown-resume");
+  task.status = "running";
+  task.sideEffectsPossible = true;
+  const message = {
+    id: "message-unknown",
+    conversationId: "execution:e:task:unknown-resume",
+    role: "bot",
+    createdAt: new Date().toISOString(),
+    status: "error",
+    parts: [{
+      kind: "tool",
+      toolCallId: "tool-unknown",
+      name: "browser_click",
+      label: "Click button",
+      status: "outcome_unknown",
+    }],
+  };
+  assert.equal(updateTaskForTurnProgress(task, message, message.conversationId), true);
+  assert.equal(task.status, "outcome_unknown");
+  assert.match(task.error, /reconcile its outcome before retrying/);
+  assert.ok(task.completedAt);
+  assert.equal(task.approvalRequest, undefined);
+});
+
 test("distinguishes rejected actions from mixed uncertain tool outcomes", () => {
   const message = {
     id: "message-1",

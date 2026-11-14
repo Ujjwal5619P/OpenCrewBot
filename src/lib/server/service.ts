@@ -23,6 +23,7 @@ const g = globalThis as unknown as { __opencrewbotBoot?: Promise<void> };
 export function boot(): Promise<void> {
   g.__opencrewbotBoot ??= (async () => {
     await sweepInterrupted();
+    await store.cancelPendingApprovalRequests("server-restart");
     await seed();
     await recoverTaskExecutions();
   })();
@@ -117,6 +118,20 @@ function validateBot(input: Partial<BotInput>) {
   if (input.name !== undefined && !input.name.trim()) throw new InputError("A bot needs a name.");
   if (input.name && input.name.length > 40) throw new InputError("Keep the name under 40 characters.");
   if (input.instructions && input.instructions.length > 8000) throw new InputError("Instructions are limited to 8,000 characters.");
+  if (input.approval !== undefined && !["ask", "controlled", "full"].includes(input.approval)) {
+    throw new InputError("Choose Ask First, Controlled Access, or Full Access.");
+  }
+  if (input.approvalPermissions !== undefined) {
+    const permissions = input.approvalPermissions;
+    if (
+      !Array.isArray(permissions) ||
+      permissions.length > 100 ||
+      permissions.some((toolName) => typeof toolName !== "string" || !/^[a-zA-Z0-9_]{1,120}$/.test(toolName)) ||
+      new Set(permissions).size !== permissions.length
+    ) {
+      throw new InputError("Approval permissions must be unique tool IDs, with at most 100 entries.");
+    }
+  }
 }
 
 export async function createBot(input: BotInput): Promise<Bot> {
@@ -126,6 +141,7 @@ export async function createBot(input: BotInput): Promise<Bot> {
     id: randomUUID().slice(0, 8),
     name: input.name.trim(),
     connections: input.connections ?? [],
+    approvalPermissions: input.approvalPermissions ?? [],
     handle: await uniqueHandle(input.handle || input.name),
     createdAt: new Date().toISOString(),
   };
@@ -145,6 +161,7 @@ export async function updateBot(id: string, patch: Partial<BotInput>): Promise<B
     id: bot.id,
     createdAt: bot.createdAt,
     tools: { ...bot.tools, ...(patch.tools ?? {}) },
+    approvalPermissions: patch.approvalPermissions ?? bot.approvalPermissions ?? [],
     handle: patch.handle !== undefined || patch.name !== undefined ? await uniqueHandle(patch.handle || patch.name || bot.handle, id) : bot.handle,
   };
   await store.saveBot(next);

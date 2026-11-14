@@ -4,6 +4,8 @@ import { createClient, type Client } from "@libsql/client";
 import { APP_DB_URL } from "./config";
 import type {
   Bot,
+  ApprovalRequest,
+  ApprovalRequestStatus,
   ChatMessage,
   CollaborationMessage,
   ConversationId,
@@ -18,7 +20,7 @@ import type {
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 async function open(): Promise<Client> {
   const db = createClient({ url: APP_DB_URL });
@@ -114,6 +116,33 @@ async function open(): Promise<Client> {
     );
     await db.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (4, ?)", [new Date().toISOString()]);
   }
+  if (version < 5) {
+    await db.batch(
+      [
+        `CREATE TABLE IF NOT EXISTS approval_requests (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          bot_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          tool_call_id TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          action TEXT NOT NULL,
+          details TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          decided_at TEXT,
+          decision_by TEXT,
+          execution_id TEXT,
+          task_id TEXT,
+          UNIQUE (conversation_id, bot_id, tool_call_id)
+        )`,
+        "CREATE INDEX IF NOT EXISTS approvals_by_status_and_created ON approval_requests (status, created_at DESC)",
+        { sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)", args: [new Date().toISOString()] },
+      ],
+      "write",
+    );
+  }
   return db;
 }
 
@@ -149,6 +178,10 @@ function normalizeBot(raw: Bot): Bot {
   return {
     ...raw,
     connections: raw.connections ?? [],
+    approval: raw.approval === "full" || raw.approval === "controlled" ? raw.approval : "ask",
+    approvalPermissions: Array.isArray(raw.approvalPermissions)
+      ? raw.approvalPermissions.filter((toolName): toolName is string => typeof toolName === "string")
+      : [],
   };
 }
 
@@ -255,6 +288,181 @@ export async function markRead(conversationId: ConversationId): Promise<void> {
           ON CONFLICT(id) DO UPDATE SET last_read_at = excluded.last_read_at`,
     args: [conversationId, new Date().toISOString()],
   });
+}
+
+function decodeApprovalRequest(row: Record<string, unknown>): ApprovalRequest {
+  const decidedAt = row.decided_at == null ? undefined : String(row.decided_at);
+  const decisionBy = row.decision_by == null ? undefined : String(row.decision_by);
+  const executionId = row.execution_id == null ? undefined : String(row.execution_id);
+  const taskId = row.task_id == null ? undefined : String(row.task_id);
+  return {
+    id: String(row.id),
+    conversationId: String(row.conversation_id),
+    botId: String(row.bot_id),
+    messageId: String(row.message_id),
+    toolCallId: String(row.tool_call_id),
+    toolName: String(row.tool_name),
+    action: String(row.action),
+    details: String(row.details),
+    status: String(row.status) as ApprovalRequestStatus,
+    createdAt: String(row.created_at),
+    expiresAt: String(row.expires_at),
+    ...(decidedAt ? { decidedAt } : {}),
+    ...(decisionBy ? { decisionBy } : {}),
+    ...(executionId ? { executionId } : {}),
+    ...(taskId ? { taskId } : {}),
+  };
+}
+
+const APPROVAL_COLUMNS =
+  "id, conversation_id, bot_id, message_id, tool_call_id, tool_name, action, details, status, created_at, expires_at, decided_at, decision_by, execution_id, task_id";
+
+export async function createApprovalRequest(request: ApprovalRequest): Promise<ApprovalRequest> {
+  const client = await db();
+  await client.execute({
+    sql: `INSERT OR IGNORE INTO approval_requests
+      (id, conversation_id, bot_id, message_id, tool_call_id, tool_name, action, details, status, created_at, expires_at, decided_at, decision_by, execution_id, task_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      request.id,
+      request.conversationId,
+      request.botId,
+      request.messageId,
+      request.toolCallId,
+      request.toolName,
+      request.action,
+      request.details,
+      request.status,
+      request.createdAt,
+      request.expiresAt,
+      request.decidedAt ?? null,
+      request.decisionBy ?? null,
+      request.executionId ?? null,
+      request.taskId ?? null,
+    ],
+  });
+  const saved = await getApprovalRequest(request.conversationId, request.botId, request.toolCallId);
+  if (!saved) throw new Error("Approval request was not persisted.");
+  return saved;
+}
+
+export async function getApprovalRequest(
+  conversationId: ConversationId,
+  botId: string,
+  toolCallId: string,
+): Promise<ApprovalRequest | null> {
+  const rows = await (await db()).execute({
+    sql: `SELECT ${APPROVAL_COLUMNS} FROM approval_requests WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ?`,
+    args: [conversationId, botId, toolCallId],
+  });
+  return rows.rows[0] ? decodeApprovalRequest(rows.rows[0]) : null;
+}
+
+export async function decideApprovalRequest(
+  conversationId: ConversationId,
+  botId: string,
+  toolCallId: string,
+  approve: boolean,
+): Promise<{ request: ApprovalRequest | null; reason?: "not_found" | "already_decided" | "cancelled" | "expired" }> {
+  const client = await db();
+  const now = new Date().toISOString();
+  await client.execute({
+    sql: `UPDATE approval_requests
+      SET status = 'expired', decided_at = ?, decision_by = 'system:expiration'
+      WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ? AND status = 'pending' AND expires_at <= ?`,
+    args: [now, conversationId, botId, toolCallId, now],
+  });
+  const result = await client.execute({
+    sql: `UPDATE approval_requests
+      SET status = ?, decided_at = ?, decision_by = 'local-owner'
+      WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ? AND status = 'pending' AND expires_at > ?`,
+    args: [approve ? "approved" : "rejected", now, conversationId, botId, toolCallId, now],
+  });
+  if (result.rowsAffected === 1) {
+    return { request: await getApprovalRequest(conversationId, botId, toolCallId) };
+  }
+  const request = await getApprovalRequest(conversationId, botId, toolCallId);
+  if (!request) return { request: null, reason: "not_found" };
+  if (request.status === "expired") return { request, reason: "expired" };
+  if (request.status === "cancelled") return { request, reason: "cancelled" };
+  return { request, reason: "already_decided" };
+}
+
+export async function cancelPendingApprovalRequests(
+  reason: string,
+  conversationId?: ConversationId,
+  botId?: string,
+): Promise<void> {
+  const clauses = ["status = 'pending'"];
+  const args: (string | null)[] = [new Date().toISOString(), `system:${reason}`];
+  if (conversationId !== undefined) {
+    clauses.push("conversation_id = ?");
+    args.push(conversationId);
+  }
+  if (botId !== undefined) {
+    clauses.push("bot_id = ?");
+    args.push(botId);
+  }
+  await (await db()).execute({
+    sql: `UPDATE approval_requests SET status = 'cancelled', decided_at = ?, decision_by = ? WHERE ${clauses.join(" AND ")}`,
+    args,
+  });
+}
+
+export async function cancelApprovalRequest(
+  conversationId: ConversationId,
+  botId: string,
+  toolCallId: string,
+  reason: string,
+): Promise<void> {
+  await (await db()).execute({
+    sql: `UPDATE approval_requests
+      SET status = 'cancelled', decided_at = ?, decision_by = ?
+      WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ? AND status = 'pending'`,
+    args: [new Date().toISOString(), `system:${reason}`, conversationId, botId, toolCallId],
+  });
+}
+
+export async function failApprovalResume(
+  conversationId: ConversationId,
+  botId: string,
+  toolCallId: string,
+): Promise<void> {
+  await (await db()).execute({
+    sql: `UPDATE approval_requests
+      SET status = 'failed', decided_at = ?, decision_by = 'system:resume-failed'
+      WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ? AND status = 'approved'`,
+    args: [new Date().toISOString(), conversationId, botId, toolCallId],
+  });
+}
+
+export async function markApprovalOutcomeUnknown(
+  conversationId: ConversationId,
+  botId: string,
+  toolCallId: string,
+): Promise<void> {
+  await (await db()).execute({
+    sql: `UPDATE approval_requests
+      SET status = 'outcome_unknown', decided_at = ?, decision_by = 'system:resume-outcome-unknown'
+      WHERE conversation_id = ? AND bot_id = ? AND tool_call_id = ? AND status = 'approved'`,
+    args: [new Date().toISOString(), conversationId, botId, toolCallId],
+  });
+}
+
+export async function listApprovalRequests(limit = 100): Promise<ApprovalRequest[]> {
+  const client = await db();
+  const now = new Date().toISOString();
+  await client.execute({
+    sql: `UPDATE approval_requests
+      SET status = 'expired', decided_at = ?, decision_by = 'system:expiration'
+      WHERE status = 'pending' AND expires_at <= ?`,
+    args: [now, now],
+  });
+  const rows = await client.execute({
+    sql: `SELECT ${APPROVAL_COLUMNS} FROM approval_requests ORDER BY created_at DESC LIMIT ?`,
+    args: [Math.max(1, Math.min(200, Math.floor(limit)))],
+  });
+  return rows.rows.map(decodeApprovalRequest);
 }
 
 /** Bumped by "Clear chat" so each bot starts a fresh model-side thread. */

@@ -197,7 +197,13 @@ function BotDetails({ bot }: { bot: Bot }) {
           <p className="text-[13.5px] text-mute">No tools. It only chats.</p>
         )}
         {bot.tools.browser && (
-          <p className="mt-2.5 text-[12.5px] text-mute">{bot.approval === "full" ? "Full access: browses without asking." : "Asks before each browser action."}</p>
+          <p className="mt-2.5 text-[12.5px] text-mute">
+            {bot.approval === "full"
+              ? "Full Access: configured browser tools run without individual prompts."
+              : bot.approval === "controlled"
+                ? "Controlled Access: listed safe actions may run without prompting; sensitive actions still ask."
+                : "Ask First: browser actions wait for your approval."}
+          </p>
         )}
       </Card>
       <BotConnections bot={bot} />

@@ -156,6 +156,14 @@ Executions and tasks are stored in the app's versioned SQLite schema. A server r
 
 Startup recovery assumes one active server process owns the SQLite database. Do not run multiple OpenCrewBot server processes against the same database: a process starting up cannot distinguish another live process's running execution from work interrupted by a restart.
 
+### Approval and permission controls
+
+Each bot can use **Ask First**, **Controlled Access**, or **Full Access**. Ask First preserves the existing read/edit behavior and pauses tools categorized as execution, connected-app/MCP, or other actions. MCP tools always require approval in Ask First and Controlled Access: their server-controlled names are not trusted as evidence that an action is read-only. Controlled Access only skips approval for exact configured tool IDs that are not classified as sensitive. Full Access skips individual approval prompts for tools actually registered to the bot, but does not add tools or grant arbitrary operating-system access. Code mode receives only the tools allowed by the same policy.
+
+Pending actions and recent decisions appear in Settings → Approval Centre. Requests expire after 30 minutes and pending requests are cancelled on server startup because Mastra's suspended approval flow is in memory; they are not replayed after a restart. Approval decisions are persisted before the suspended tool is resumed, and a request can be decided only once. If resumption throws after approval, the action is marked `outcome_unknown` and is not retried automatically; reconcile it before retrying. Approval-preview redaction is pattern-based: it covers common credential field names and formats, but cannot detect every possible secret representation and should not be relied on as secret storage.
+
+OpenCrewBot is a local, single-owner app without sign-in. Its local-owner decision identity is not multi-user authorization; keep it bound to localhost and do not expose the API to untrusted users.
+
 ## Get started
 
 Use **Node.js 22.13 or newer** (developed on 24) and **pnpm**:
@@ -223,7 +231,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, hand-offs, bounded task delegation, research sharing, Q&A and verification |
 | Executions | Chief of Staff plans, dependency-aware parallel tasks, retries, cancellation and persistent history |
 | Memory | Private `MEMORY.md` per bot plus opt-in shared `PROJECT_MEMORY.md`, editable in the app, with provenance labels and secret redaction |
-| Approvals | Allow once / Deny cards for browser actions, plus ask-you question cards that resume the run |
+| Approvals | Ask First, Controlled Access and Full Access; persisted Approval Centre, plus ask-you question cards |
 | Browser | Browserbase session per bot, embedded live view with takeover, release on reset |
 | Code mode | Multi-tool TypeScript in a QuickJS sandbox with no filesystem or network access |
 | Mock mode | A scripted model that exercises the real tools, approvals and streaming without any keys |

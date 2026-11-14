@@ -22,6 +22,7 @@ function blankBot(defaultModel: string): BotInput {
     model: defaultModel,
     tools: { webSearch: true, memory: true, codeMode: false, browser: false, askUser: true },
     approval: "ask",
+    approvalPermissions: [],
     pinned: false,
   };
 }
@@ -202,11 +203,28 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
             value={form.approval}
             onChange={(v) => set("approval", v)}
             options={[
-              { value: "ask", label: "Ask first", hint: "Browser actions wait for your OK." },
-              { value: "full", label: "Full access", hint: "Acts without asking." },
+              { value: "ask", label: "Ask first", hint: "Sensitive actions wait for your OK." },
+              { value: "controlled", label: "Controlled", hint: "Only listed safe tool IDs skip approval." },
+              { value: "full", label: "Full access", hint: "Configured tools run without individual prompts." },
             ]}
           />
         </Field>
+        {form.approval === "controlled" && (
+          <Field label="Allowed action IDs" hint="Exact tool IDs only, one per line. Sensitive, connected-app, and MCP actions still ask. Unavailable tools have no effect.">
+            <textarea
+              className={clsx(inputClass, "min-h-20 resize-y font-mono text-[12px]")}
+              value={(form.approvalPermissions ?? []).join("\n")}
+              maxLength={12_000}
+              onChange={(event) =>
+                set(
+                  "approvalPermissions",
+                  [...new Set(event.target.value.split(/[\n,]/).map((value) => value.trim()).filter(Boolean))],
+                )
+              }
+              placeholder="browser_goto"
+            />
+          </Field>
+        )}
 
         {bot && (
           <div className="pt-2">

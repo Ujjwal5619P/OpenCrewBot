@@ -126,13 +126,22 @@ async function update(task: ExecutionTask, callback: TaskGraphOptions["onTaskUpd
 }
 
 export function updateTaskForTurnProgress(task: ExecutionTask, message: ChatMessage, conversationId: string): boolean {
+  const unknownOutcome = message.parts.find(
+    (part) => part.kind === "tool" && part.status === "outcome_unknown",
+  );
   const approval = message.parts.find(
     (part) => part.kind === "tool" && part.status === "awaiting-approval",
   );
   const question = message.parts.find(
     (part) => part.kind === "question" && part.answer === undefined,
   );
-  const nextStatus: ExecutionTask["status"] = approval ? "awaiting_approval" : question ? "awaiting_input" : "running";
+  const nextStatus: ExecutionTask["status"] = unknownOutcome
+    ? "outcome_unknown"
+    : approval
+      ? "awaiting_approval"
+      : question
+        ? "awaiting_input"
+        : "running";
   const nextApproval =
     approval?.kind === "tool" ? { conversationId, toolCallId: approval.toolCallId } : undefined;
   const nextInput =
@@ -151,6 +160,10 @@ export function updateTaskForTurnProgress(task: ExecutionTask, message: ChatMess
   task.status = nextStatus;
   task.approvalRequest = nextApproval;
   task.inputRequest = nextInput;
+  if (unknownOutcome) {
+    task.error = "The action may have run; reconcile its outcome before retrying.";
+    task.completedAt ??= new Date().toISOString();
+  }
   return changed;
 }
 

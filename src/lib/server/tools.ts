@@ -12,6 +12,7 @@ import { publish } from "./bus";
 import { keys } from "./config";
 import { mcpServerNames } from "./connectors";
 import { canAccessProjectMemory } from "./project-memory";
+import { toolsAllowedInCodeMode } from "./approval-core";
 
 export const CODE_MODE_TOOL = "execute_typescript";
 
@@ -172,7 +173,12 @@ export function buildTools(bot: Bot): BotToolset {
   if (bot.tools.codeMode) {
     // The program runs in a QuickJS (WebAssembly) isolate with no filesystem or
     // network; its only reach is the tools passed here, bridged back to the host.
-    const reachable = { ...tools };
+    const reachable = toolsAllowedInCodeMode(
+      tools,
+      bot.approval,
+      bot.approvalPermissions ?? [],
+      toolCategory,
+    ) as ToolsInput;
     const codeMode = createCodeMode({ tools: reachable, timeout: 60_000 }, new QuickJsCodeModeTransport({ memoryLimitMb: 128 }));
     tools[CODE_MODE_TOOL] = codeMode.tool;
     instructions.push(codeMode.instructions);
@@ -192,22 +198,18 @@ export function buildTools(bot: Bot): BotToolset {
 
 /** Which approval policy a tool falls under. Read and memory tools never ask;
  * acting in the browser does, unless the bot has Full access. */
-/** MCP tool names that only look things up. A heuristic over the tool's own name:
- * anything that doesn't read clearly as a lookup asks first. */
-const READ_ONLY_VERB = /^(get|list|search|read|fetch|find|view|show|describe|lookup|query)(_|$)/;
-
 export function toolCategory(toolName: string): ToolCategory | null {
   if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
   if (toolName === "project_memory_read") return "read";
   if (toolName === "project_memory_add") return "edit";
+  if (["delegate_room_work", "room_collaborate"].includes(toolName)) return "edit";
   // Composio: looking up actions is free; running them ("multi execute", the remote workbench) asks.
   if (toolName.startsWith("COMPOSIO_")) {
     return /SEARCH_TOOLS|GET_TOOL_SCHEMAS|MANAGE_CONNECTIONS/.test(toolName) ? "read" : "mcp";
   }
-  if (toolName.startsWith("mcp_")) {
-    const action = toolName.split("_").slice(2).join("_");
-    return READ_ONLY_VERB.test(action) ? "read" : "mcp";
-  }
+  // MCP tool names and descriptions are server-controlled, so never infer that
+  // an MCP action is read-only from its name.
+  if (toolName.startsWith("mcp_")) return "mcp";
   if (toolName.startsWith("memory_")) return "edit";
   if (toolName.startsWith("browser_")) {
     return /snapshot|screenshot|scroll|wait|tabs|close|get_|read|extract|console/.test(toolName) ? "read" : "execute";

@@ -110,7 +110,10 @@ function ToolChip({ message, part }: { message: ChatMessage; part: ToolPart }) {
           {part.status === "running" && <Loader2 size={14} className="animate-spin text-mute" aria-label="Running" />}
           {part.status === "done" && <Check size={14} className="text-ok" aria-label="Done" />}
           {part.status === "error" && <X size={14} className="text-danger" aria-label="Failed" />}
-          {part.status === "denied" && <span className="text-[12px] text-faint">Skipped</span>}
+          {part.status === "denied" && <span className="text-[12px] text-faint">Rejected</span>}
+          {part.status === "outcome_unknown" && (
+            <span className="text-[12px] text-warn" aria-label="Outcome unknown; reconcile before retrying">Outcome unknown</span>
+          )}
           {expandable && <ChevronRight size={14} className={clsx("text-faint transition-transform", open && "rotate-90")} aria-hidden />}
         </span>
       </button>

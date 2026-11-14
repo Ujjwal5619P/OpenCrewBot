@@ -1,6 +1,7 @@
 import type {
   AppStatus,
   AgentConfigurationResult,
+  ApprovalRequest,
   Bot,
   BotInput,
   ChatMessage,
@@ -70,6 +71,7 @@ export const api = {
   send: (id: ConversationId, text: string) => call<{ message: ChatMessage }>(`${conv(id)}/messages`, { method: "POST", json: { text } }),
   approve: (id: ConversationId, botId: string, toolCallId: string, approve: boolean) =>
     call(`${conv(id)}/approval`, { method: "POST", json: { botId, toolCallId, approve } }),
+  approvals: () => call<{ requests: ApprovalRequest[] }>("/api/approvals"),
   answer: (id: ConversationId, botId: string, toolCallId: string, answer: string) =>
     call(`${conv(id)}/answer`, { method: "POST", json: { botId, toolCallId, answer } }),
   stop: (id: ConversationId) => call(`${conv(id)}/stop`, { method: "POST" }),
