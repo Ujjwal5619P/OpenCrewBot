@@ -36,6 +36,28 @@ export interface Bot {
 
 export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections"> & { handle?: string; connections?: string[] };
 
+export interface AgentConfiguration {
+  name: string;
+  title: string;
+  description: string;
+  instructions: string;
+  model: string;
+  tools: BotTools;
+  skills: string[];
+  memory: { enabled: boolean; guidance: string };
+  approval: ApprovalMode;
+  approvalPermissions: { browserActions: "ask"; connectedAppActions: "ask" };
+  expectedOutputFormat: string;
+}
+
+export interface AgentConfigurationResult {
+  configuration: AgentConfiguration;
+  botInput: BotInput;
+  mode: "live" | "simulated";
+  label: string;
+  unavailableTools: ("webSearch" | "browser")[];
+}
+
 export type RoomResponder = "auto" | "lead" | "everyone";
 
 export interface Room {

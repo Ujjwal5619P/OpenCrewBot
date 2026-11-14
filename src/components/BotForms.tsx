@@ -51,20 +51,28 @@ export function ColorPicker({ value, onChange }: { value: string; onChange: (c: 
 }
 
 /** Create or edit a bot. In edit mode the save bar appears only once something changes. */
-export function BotForm({ bot, onDone }: { bot?: Bot; onDone?: (bot: Bot) => void }) {
+export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue?: BotInput; onDone?: (bot: Bot) => void }) {
   const { state, open, toast } = useApp();
   const defaultModel = state.models.find((m) => m.id === "MiniMaxAI/MiniMax-M3")?.id ?? state.models[0]?.id ?? "MiniMaxAI/MiniMax-M3";
-  const [initial, setInitial] = useState<BotInput>(() => (bot ? { ...bot } : blankBot(defaultModel)));
+  const [initial, setInitial] = useState<BotInput>(() => (bot ? { ...bot } : initialValue ? { ...initialValue } : blankBot(defaultModel)));
   const [form, setForm] = useState<BotInput>(initial);
   const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const keys = state.status?.keys;
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
 
-  const set = <K extends keyof BotInput>(k: K, v: BotInput[K]) => setForm((f) => ({ ...f, [k]: v }));
-  const setTool = (k: keyof BotInput["tools"], v: boolean) => setForm((f) => ({ ...f, tools: { ...f.tools, [k]: v } }));
+  const set = <K extends keyof BotInput>(k: K, v: BotInput[K]) => {
+    setErrorMessage(null);
+    setForm((f) => ({ ...f, [k]: v }));
+  };
+  const setTool = (k: keyof BotInput["tools"], v: boolean) => {
+    setErrorMessage(null);
+    setForm((f) => ({ ...f, tools: { ...f.tools, [k]: v } }));
+  };
 
   const save = async () => {
     setSaving(true);
+    setErrorMessage(null);
     try {
       if (bot) {
         const { bot: saved } = await api.updateBot(bot.id, form);
@@ -78,7 +86,9 @@ export function BotForm({ bot, onDone }: { bot?: Bot; onDone?: (bot: Bot) => voi
         onDone?.(created);
       }
     } catch (error) {
-      toast(error instanceof Error ? error.message : "Couldn't save.");
+      const message = error instanceof Error ? error.message : "Couldn't save.";
+      setErrorMessage(message);
+      toast(message);
     } finally {
       setSaving(false);
     }
@@ -97,6 +107,11 @@ export function BotForm({ bot, onDone }: { bot?: Bot; onDone?: (bot: Bot) => voi
   return (
     <div className="flex flex-col">
       <div className="space-y-5">
+        {errorMessage && (
+          <p role="alert" className="rounded-xl bg-danger-soft px-3.5 py-2.5 text-[13px] text-danger">
+            {errorMessage}
+          </p>
+        )}
         {!bot && (
           <div className="flex flex-col items-center gap-4 pt-1">
             <Mascot color={form.color} size={72} />

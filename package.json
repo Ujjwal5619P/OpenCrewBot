@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs"
+    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs tests/agent-creation.test.mjs"
   },
   "dependencies": {
     "@composio/core": "^0.23.0",
@@ -24,7 +24,7 @@
     "@tavily/core": "^0.7.14",
     "clsx": "^2.1.1",
     "lucide-react": "^1.55.0",
-    "next": "16.4.0",
+    "next": "16.4.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-markdown": "^10.1.0",
@@ -38,7 +38,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.4.0",
+    "eslint-config-next": "16.4.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   },

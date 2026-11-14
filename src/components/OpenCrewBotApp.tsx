@@ -9,12 +9,13 @@ import { Sidebar } from "./Sidebar";
 import { ChatView } from "./ChatView";
 import { Inspector } from "./Inspector";
 import { NewBotDrawer } from "./BotForms";
+import { AgentCreator } from "./AgentCreator";
 import { NewRoomDrawer } from "./RoomForms";
 import { SettingsPanel } from "./SettingsPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
 
 /** Modal sheets. Editing an existing bot or room happens in the inspector instead. */
-export type Panel = { kind: "new-bot" } | { kind: "new-room" } | { kind: "settings" } | { kind: "connections" } | null;
+export type Panel = { kind: "new-bot" } | { kind: "new-agent-ai" } | { kind: "new-room" } | { kind: "settings" } | { kind: "connections" } | null;
 
 /** Bots use details/memory/browser; rooms use members/settings. */
 export type InspectorTab = "details" | "memory" | "browser" | "members" | "settings";
@@ -223,6 +224,7 @@ export function OpenCrewBotApp() {
         )}
       </div>
       {panel?.kind === "new-bot" && <NewBotDrawer onClose={() => setPanel(null)} />}
+      {panel?.kind === "new-agent-ai" && <AgentCreator onClose={() => setPanel(null)} />}
       {panel?.kind === "new-room" && <NewRoomDrawer onClose={() => setPanel(null)} />}
       {panel?.kind === "settings" && <SettingsPanel onClose={() => setPanel(null)} />}
       {panel?.kind === "connections" && <ConnectionsPanel onClose={() => setPanel(null)} />}

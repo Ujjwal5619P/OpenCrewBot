@@ -1,5 +1,6 @@
 import type {
   AppStatus,
+  AgentConfigurationResult,
   Bot,
   BotInput,
   ChatMessage,
@@ -40,6 +41,8 @@ export const api = {
   bootstrap: () => call<Bootstrap>("/api/bootstrap"),
   models: (refresh = false) => call<{ models: ModelOption[] }>(`/api/models${refresh ? "?refresh=1" : ""}`),
   createBot: (input: BotInput) => call<{ bot: Bot }>("/api/bots", { method: "POST", json: input }),
+  generateAgent: (description: string) =>
+    call<AgentConfigurationResult>("/api/bots/generate", { method: "POST", json: { description } }),
   updateBot: (id: string, patch: Partial<BotInput>) => call<{ bot: Bot }>(`/api/bots/${id}`, { method: "PATCH", json: patch }),
   deleteBot: (id: string) => call(`/api/bots/${id}`, { method: "DELETE" }),
   getMemory: (id: string) => call<{ content: string; path: string; limit: { lines: number; bytes: number } }>(`/api/bots/${id}/memory`),

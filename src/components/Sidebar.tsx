@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { MoreHorizontal, PanelLeft, Pin, Plug, Plus, Search, Settings, X } from "lucide-react";
+import { MoreHorizontal, PanelLeft, Pin, Plug, Plus, Search, Settings, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
 import { timeLabel } from "@/lib/client/format";
@@ -256,6 +256,7 @@ export function Sidebar() {
               onClose={() => setNewMenu(false)}
               items={[
                 { label: "New bot", onClick: () => setPanel({ kind: "new-bot" }), icon: <Mascot color="#3b82f6" size={18} /> },
+                { label: "Create Agent with AI", onClick: () => setPanel({ kind: "new-agent-ai" }), icon: <Sparkles size={17} /> },
                 { label: "New room", onClick: () => setPanel({ kind: "new-room" }), icon: <RoomAvatar colors={["#22c55e", "#f59e0b"]} size={18} /> },
               ]}
             />

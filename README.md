@@ -48,6 +48,12 @@ Give each bot a name, a role, instructions, a model and a set of tools. Each rep
 
 The details panel keeps a short summary of the bot, with the full editor one click away. Changes apply from the bot's next reply.
 
+### Create agents with AI
+
+Choose **Create Agent with AI** in the sidebar and describe the specialist you need. OpenCrewBot proposes a name, role, instructions, model, tools, memory guidance, approval setting, skills guidance and expected output format. Review the draft and edit it in the existing bot form before saving; the usual `createBot()` path stores the bot and creates its private `MEMORY.md`.
+
+With `NEBIUS_API_KEY`, the app uses the configured Nebius model for live structured generation. Without that key, it creates a clearly labelled **simulated configuration** using deterministic local rules; no AI inference is claimed. In either mode, unavailable search or browser tools are disabled, approval defaults to **Ask first**, and no external integrations or skills runtime are added. Skills and output format are included as editable instructions.
+
 ### Rooms
 
 Put bots in a room and talk to all of them at once. @mention a bot to choose who answers, or `@everyone`. With no mention, an **Auto** room asks [Jev](https://typesafe.ai), TypeSafe's decision model, to pick the best bot in a few hundred milliseconds. If Jev isn't sure, the room's lead answers. A bot can @mention a teammate to hand work on, up to two hops.
@@ -199,6 +205,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Area | Included |
 | --- | --- |
 | Bots | Name, role, instructions, color, model, tools and approval level per bot; pin, search, unread counts, live typing status |
+| Agent creation | Natural-language agent drafts with live or explicitly simulated generation, editable before creation |
 | Models | Model sheet with suggested picks, search and the live Token Factory catalog; switch without a restart; tokens and cost on every reply |
 | Connections | Composio apps with one-click sign-in, your own MCP servers (GitHub preset), per-bot access, approval for actions |
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
