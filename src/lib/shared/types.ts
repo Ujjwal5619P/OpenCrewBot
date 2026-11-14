@@ -171,3 +171,66 @@ export interface ConnectionOption {
   kind: "composio" | "mcp";
   logo?: string;
 }
+
+export type ExecutionTaskStatus =
+  | "pending"
+  | "running"
+  | "awaiting_approval"
+  | "awaiting_input"
+  | "completed"
+  | "failed"
+  | "outcome_unknown"
+  | "cancelled";
+export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type PlannerMode = "ai" | "simulated";
+export type TaskCapability =
+  | "research"
+  | "writing"
+  | "planning"
+  | "analysis"
+  | "webSearch"
+  | "memory"
+  | "codeMode"
+  | "browser"
+  | "connectedApps"
+  | "askUser";
+
+export interface ExecutionTask {
+  id: string;
+  title: string;
+  description: string;
+  assignedBotId: string;
+  requiredCapabilities: TaskCapability[];
+  dependencies: string[];
+  status: ExecutionTaskStatus;
+  output?: string;
+  error?: string;
+  approvalRequest?: { conversationId: ConversationId; toolCallId: string };
+  inputRequest?: {
+    conversationId: ConversationId;
+    toolCallId: string;
+    question: string;
+    options: { label: string; description?: string }[];
+  };
+  sideEffectsPossible?: boolean;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  retryCount: number;
+  approvalRequired: boolean;
+}
+
+export interface Execution {
+  id: string;
+  instruction: string;
+  summary: string;
+  plannerMode: PlannerMode;
+  plannerLabel: string;
+  status: ExecutionStatus;
+  tasks: ExecutionTask[];
+  output?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}

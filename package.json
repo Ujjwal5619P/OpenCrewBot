@@ -7,7 +7,8 @@
     "dev": "next dev -H 127.0.0.1",
     "build": "next build",
     "start": "next start -H 127.0.0.1",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs"
   },
   "dependencies": {
     "@composio/core": "^0.23.0",

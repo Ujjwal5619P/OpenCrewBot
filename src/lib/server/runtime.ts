@@ -18,6 +18,7 @@ import { announceLiveView, createSession, releaseSession } from "./browserbase";
 import { buildConnectorTools, connectionsVersion } from "./connectors";
 import { systemPrompt } from "./prompt";
 import { buildTools, toolCategory, toolLabel, toolPreview, toolSources } from "./tools";
+import { createKeyedLock } from "./execution-core";
 
 // ── shared state that must survive Next.js hot reloads ─────────────────
 
@@ -44,6 +45,8 @@ interface State {
   folders: Map<string, TurnFolder>;
   /** conversationId → bumped by Stop, so turns queued before it never start */
   stopEpoch: Map<ConversationId, number>;
+  /** Browser sessions are shared per bot, so browser turns must share one queue. */
+  browserLock: ReturnType<typeof createKeyedLock>;
 }
 
 const g = globalThis as unknown as { __opencrewbotRuntime?: State };
@@ -55,7 +58,9 @@ const state: State = (g.__opencrewbotRuntime ??= {
   running: new Map(),
   folders: new Map(),
   stopEpoch: new Map(),
+  browserLock: createKeyedLock(),
 });
+state.browserLock ??= createKeyedLock();
 
 const key = (conversationId: ConversationId, botId: string) => `${conversationId}|${botId}`;
 
@@ -208,7 +213,12 @@ class TurnFolder {
   readonly done = new Promise<ChatMessage>((r) => (this.resolveDone = r));
   finished = false;
 
-  constructor(conversationId: ConversationId, bot: Bot, route?: RouteNote) {
+  constructor(
+    conversationId: ConversationId,
+    bot: Bot,
+    route?: RouteNote,
+    private readonly onProgress?: (message: ChatMessage) => void,
+  ) {
     this.message = {
       id: randomUUID(),
       conversationId,
@@ -223,6 +233,7 @@ class TurnFolder {
   }
 
   private emit(persist = false) {
+    this.onProgress?.(this.message);
     publish({ type: "message", message: this.message });
     if (persist) void saveMessage(this.message);
   }
@@ -330,6 +341,13 @@ class TurnFolder {
     this.emit(true);
   }
 
+  approval(toolCallId: string, approve: boolean | undefined) {
+    const part = this.tool(toolCallId);
+    if (!part) return;
+    part.status = approve === undefined ? "awaiting-approval" : approve ? "running" : "denied";
+    this.emit(true);
+  }
+
   async finish(status: ChatMessage["status"], error?: string) {
     if (this.finished) return;
     this.finished = true;
@@ -349,6 +367,7 @@ class TurnFolder {
     } else {
       this.message.usage = { input: this.input, output: this.output, costUsd: null };
     }
+    this.onProgress?.(this.message);
     await saveMessage(this.message);
     publish({ type: "message", message: this.message });
     this.resolveDone(this.message);
@@ -363,17 +382,22 @@ export interface TurnRequest {
   /** What the bot receives: the person's words, or a room's catch-up text. */
   content: string;
   route?: RouteNote;
+  onProgress?: (message: ChatMessage) => void;
 }
 
 /** Queue one turn for one bot in one conversation and resolve with its reply,
  * or null when Stop cancelled it before it started. */
 export function runTurn(request: TurnRequest): Promise<ChatMessage | null> {
-  const k = key(request.conversationId, request.bot.id);
   const epoch = state.stopEpoch.get(request.conversationId) ?? 0;
+  const run = async () => {
+    if ((state.stopEpoch.get(request.conversationId) ?? 0) !== epoch) return null;
+    return executeTurn(request);
+  };
+  if (request.bot.tools.browser) return state.browserLock(request.bot.id, run);
+
+  const k = key(request.conversationId, request.bot.id);
   const previous = state.chains.get(k) ?? Promise.resolve();
-  const next = previous
-    .catch(() => {})
-    .then(() => ((state.stopEpoch.get(request.conversationId) ?? 0) === epoch ? executeTurn(request) : null));
+  const next = previous.catch(() => {}).then(run);
   state.chains.set(k, next);
   void next.finally(() => {
     if (state.chains.get(k) === next) state.chains.delete(k);
@@ -381,10 +405,10 @@ export function runTurn(request: TurnRequest): Promise<ChatMessage | null> {
   return next;
 }
 
-async function executeTurn({ bot, conversationId, content, route }: TurnRequest): Promise<ChatMessage> {
+async function executeTurn({ bot, conversationId, content, route, onProgress }: TurnRequest): Promise<ChatMessage> {
   const latest = (await getBot(bot.id)) ?? bot;
   const k = key(conversationId, latest.id);
-  const folder = new TurnFolder(conversationId, latest, route);
+  const folder = new TurnFolder(conversationId, latest, route, onProgress);
   setRunning(conversationId, latest.id, true);
   state.folders.set(k, folder);
   await saveMessage(folder.message);
@@ -410,9 +434,17 @@ async function executeTurn({ bot, conversationId, content, route }: TurnRequest)
 }
 
 export async function respondToApproval(conversationId: ConversationId, botId: string, toolCallId: string, approve: boolean) {
-  const session = state.sessions.get(key(conversationId, botId));
+  const k = key(conversationId, botId);
+  const session = state.sessions.get(k);
   if (!session) throw new Error("That request is no longer waiting. The bot may have restarted.");
-  await session.respondToToolApproval({ toolCallId, decision: approve ? "approve" : "decline" });
+  const folder = state.folders.get(k);
+  folder?.approval(toolCallId, approve);
+  try {
+    await session.respondToToolApproval({ toolCallId, decision: approve ? "approve" : "decline" });
+  } catch (error) {
+    folder?.approval(toolCallId, undefined);
+    throw error;
+  }
 }
 
 export async function answerQuestion(conversationId: ConversationId, botId: string, toolCallId: string, answer: string) {

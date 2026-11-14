@@ -125,6 +125,23 @@ OpenCrewBot doesn't build its own agent loop. Each bot gets a Mastra [`AgentCont
 
 All keys stay on the server. Without a Nebius key, bots run on a scripted mock model that streams replies and calls the real tools, so every part of the interface can be tried before you connect anything.
 
+### Chief of Staff executions
+
+The execution API accepts one complex instruction and returns a validated task plan, including assigned bots, required capabilities and dependencies. Independent tasks run concurrently; dependent tasks receive completed outputs as context. Task turns use the existing `AgentController` runtime, so bot tool permissions and approval prompts are unchanged.
+
+With `NEBIUS_API_KEY`, planning uses the configured model of the best-matching planning bot. Without it, the API creates a deterministic simulated plan and marks it `plannerMode: "simulated"` with the label `Simulated planning (mock mode)`; it does not report simulated work as AI inference.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/executions` with `{ "instruction": "..." }` | Plan, persist and start an execution |
+| `GET` | `/api/executions` | List recent execution history |
+| `GET` | `/api/executions/:id` | Read its plan, task statuses and output |
+| `POST` | `/api/executions/:id/cancel` | Cancel pending or running work |
+
+Executions and tasks are stored in the app's versioned SQLite schema. A server restart marks in-flight work as interrupted rather than silently replaying possible side effects; tasks with possible tool activity become `outcome_unknown` and require reconciliation, while executions that were still pending are resumed. Approval and question waits do not consume the task timeout; their request IDs are returned with the task and use the existing conversation approval and answer endpoints.
+
+Startup recovery assumes one active server process owns the SQLite database. Do not run multiple OpenCrewBot server processes against the same database: a process starting up cannot distinguish another live process's running execution from work interrupted by a restart.
+
 ## Get started
 
 Use **Node.js 22.13 or newer** (developed on 24) and **pnpm**:
@@ -166,6 +183,7 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 Bots, rooms and the chat transcript are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Each bot's memory is `data/workspaces/<botId>/MEMORY.md`. Nothing leaves your machine except calls to the services you configure:
 
 - **Nebius Token Factory** receives each bot's system prompt (including its `MEMORY.md`), the conversation, and tool results.
+- **Chief of Staff planning** sends the instruction and available bot role descriptions/instructions to the selected Nebius model. Each assigned bot receives its task and completed dependency outputs.
 - **Tavily** receives search queries and the URLs a bot reads or crawls.
 - **Browserbase** runs the cloud browser, so it sees the pages a bot visits and anything typed into them. Sessions are released when a bot is reset or deleted, and expire after `BROWSERBASE_SESSION_MINUTES`.
 - **Jev** receives the room name, member names and descriptions, the last few room messages and the new message, when an Auto room has no @mention.
@@ -185,11 +203,14 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Connections | Composio apps with one-click sign-in, your own MCP servers (GitHub preset), per-bot access, approval for actions |
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
 | Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, bot-to-bot hand-offs |
+| Executions | Chief of Staff plans, dependency-aware parallel tasks, retries, cancellation and persistent history |
 | Memory | One `MEMORY.md` per bot, loaded every turn, editable in the app, with secret redaction |
 | Approvals | Allow once / Deny cards for browser actions, plus ask-you question cards that resume the run |
 | Browser | Browserbase session per bot, embedded live view with takeover, release on reset |
 | Code mode | Multi-tool TypeScript in a QuickJS sandbox with no filesystem or network access |
 | Mock mode | A scripted model that exercises the real tools, approvals and streaming without any keys |
+
+Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do not call live planning or bot models.
 
 **What's been verified.** On October 13 and 14, 2026, these were tested locally with the mock model: streaming, tool calls, memory writes, approvals (Allow, Deny, and Stop while waiting), question cards, room @mentions and hand-offs, restart recovery, and the production build. The Browserbase path was tested by driving a local Chrome over the same CDP connection. MCP servers were tested against DeepWiki's public server (add, test, and loading its tools into a bot). The live model list comes from Token Factory, and Mastra's router was checked to accept every model on it. **Still to verify with live services:** Composio sign-in and app actions, Browserbase sessions, Jev routing, and how reliably each open model calls tools.
 
@@ -205,6 +226,8 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 ## Project layout
 
 - `src/lib/server/runtime.ts`: the harness glue. One `AgentController` per bot, one session per conversation, events folded into chat messages.
+- `src/lib/server/chief-of-staff.ts` and `execution-service.ts`: validated planning, persistent task scheduling and execution recovery.
+- `src/lib/server/execution-core.ts`: dependency validation, retries and bounded parallel task execution.
 - `src/lib/server/tools.ts`: which tools a bot gets, their approval categories, and how each looks in chat.
 - `src/lib/server/rooms.ts` and `jev.ts`: room routing, catch-up context and hand-offs.
 - `src/lib/server/memory-files.ts`: `MEMORY.md` reads, writes, edits and redaction.

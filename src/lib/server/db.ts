@@ -2,7 +2,7 @@
 // its own store (mastra.db) for each bot's model-facing thread history.
 import { createClient, type Client } from "@libsql/client";
 import { APP_DB_URL } from "./config";
-import type { Bot, ChatMessage, ConversationId, Room } from "@/lib/shared/types";
+import type { Bot, ChatMessage, ConversationId, Execution, ExecutionTask, Room } from "@/lib/shared/types";
 
 // Cached across hot reloads, together with the file it points at, so a
 // changed database path opens a fresh connection instead of reusing one
@@ -10,7 +10,7 @@ import type { Bot, ChatMessage, ConversationId, Room } from "@/lib/shared/types"
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 async function open(): Promise<Client> {
   const db = createClient({ url: APP_DB_URL });
@@ -34,6 +34,35 @@ async function open(): Promise<Client> {
     ],
     "write",
   );
+  await db.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  await db.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)", [new Date().toISOString()]);
+  const versionRows = await db.execute("SELECT MAX(version) AS version FROM schema_migrations");
+  const version = Number(versionRows.rows[0]?.version ?? 0);
+  if (version < 3) {
+    await db.batch(
+      [
+        `CREATE TABLE IF NOT EXISTS executions (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          data TEXT NOT NULL
+        )`,
+        `CREATE TABLE IF NOT EXISTS execution_tasks (
+          id TEXT PRIMARY KEY,
+          execution_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          data TEXT NOT NULL,
+          FOREIGN KEY (execution_id) REFERENCES executions(id) ON DELETE CASCADE
+        )`,
+        "CREATE INDEX IF NOT EXISTS executions_by_created_at ON executions (created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS execution_tasks_by_execution ON execution_tasks (execution_id, created_at)",
+        { sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?)", args: [new Date().toISOString()] },
+      ],
+      "write",
+    );
+  }
   return db;
 }
 
@@ -193,4 +222,115 @@ export async function bumpGeneration(conversationId: ConversationId): Promise<nu
     args: [conversationId],
   });
   return conversationGeneration(conversationId);
+}
+
+// ── task executions ────────────────────────────────────────────────────
+
+function executionHeader(execution: Execution): Omit<Execution, "tasks"> {
+  const { tasks, ...header } = execution;
+  void tasks;
+  return header;
+}
+
+function decodeExecution(header: string, status: string, tasks: ExecutionTask[]): Execution {
+  return { ...(JSON.parse(header) as Omit<Execution, "tasks">), status: status as Execution["status"], tasks };
+}
+
+export async function saveExecution(execution: Execution): Promise<void> {
+  const client = await db();
+  const statements = [
+    {
+      sql: `INSERT INTO executions (id, status, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, data = excluded.data`,
+      args: [execution.id, execution.status, execution.createdAt, new Date().toISOString(), JSON.stringify(executionHeader(execution))],
+    },
+    { sql: "DELETE FROM execution_tasks WHERE execution_id = ?", args: [execution.id] },
+    ...execution.tasks.map((task) => ({
+      sql: "INSERT INTO execution_tasks (id, execution_id, status, created_at, data) VALUES (?, ?, ?, ?, ?)",
+      args: [`${execution.id}:${task.id}`, execution.id, task.status, task.createdAt, JSON.stringify(task)],
+    })),
+  ];
+  await client.batch(statements, "write");
+}
+
+export async function getExecution(id: string): Promise<Execution | null> {
+  const client = await db();
+  const rows = await client.execute({ sql: "SELECT status, data FROM executions WHERE id = ?", args: [id] });
+  const row = rows.rows[0];
+  if (!row) return null;
+  const taskRows = await client.execute({
+    sql: "SELECT data FROM execution_tasks WHERE execution_id = ? ORDER BY created_at, id",
+    args: [id],
+  });
+  return decodeExecution(String(row.data), String(row.status), taskRows.rows.map((task) => JSON.parse(String(task.data)) as ExecutionTask));
+}
+
+export async function listExecutions(limit = 50): Promise<Execution[]> {
+  const client = await db();
+  const rows = await client.execute({
+    sql: "SELECT id, status, data FROM executions ORDER BY created_at DESC LIMIT ?",
+    args: [Math.max(1, Math.min(100, Math.floor(limit)))],
+  });
+  return Promise.all(
+    rows.rows.map(async (row) => {
+      const taskRows = await client.execute({
+        sql: "SELECT data FROM execution_tasks WHERE execution_id = ? ORDER BY created_at, id",
+        args: [String(row.id)],
+      });
+      return decodeExecution(
+        String(row.data),
+        String(row.status),
+        taskRows.rows.map((task) => JSON.parse(String(task.data)) as ExecutionTask),
+      );
+    }),
+  );
+}
+
+export async function claimExecution(id: string): Promise<boolean> {
+  const result = await (await db()).execute({
+    sql: "UPDATE executions SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'",
+    args: [new Date().toISOString(), id],
+  });
+  return result.rowsAffected === 1;
+}
+
+export async function pendingExecutions(): Promise<Execution[]> {
+  const client = await db();
+  const rows = await client.execute("SELECT id FROM executions WHERE status = 'pending' ORDER BY created_at");
+  return Promise.all(
+    rows.rows.map(async (row) => {
+      const execution = await getExecution(String(row.id));
+      if (!execution) throw new Error("A pending execution disappeared while loading recovery state.");
+      return execution;
+    }),
+  );
+}
+
+export async function recoverInterruptedExecutions(): Promise<void> {
+  const client = await db();
+  const rows = await client.execute("SELECT id FROM executions WHERE status = 'running'");
+  for (const row of rows.rows) {
+    const execution = await getExecution(String(row.id));
+    if (!execution) continue;
+    for (const task of execution.tasks) {
+      if (task.status === "running" || task.status === "awaiting_approval" || task.status === "awaiting_input") {
+        const sideEffectsPossible = task.sideEffectsPossible !== false;
+        task.status = sideEffectsPossible ? "outcome_unknown" : "failed";
+        task.error = sideEffectsPossible
+          ? "Interrupted after tool activity; reconcile its outcome before retrying."
+          : "Interrupted before an external action was confirmed.";
+        task.completedAt = new Date().toISOString();
+      } else if (task.status === "pending") {
+        task.status = "cancelled";
+        task.error = "Not started because the execution was interrupted.";
+        task.completedAt = new Date().toISOString();
+      }
+    }
+    execution.status = "failed";
+    execution.error = execution.tasks.some((task) => task.status === "outcome_unknown")
+      ? "Interrupted execution has task outcomes that require reconciliation."
+      : "Interrupted by a server restart.";
+    execution.completedAt = new Date().toISOString();
+    await saveExecution(execution);
+  }
 }

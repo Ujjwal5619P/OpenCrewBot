@@ -1,4 +1,5 @@
-import { InputError, boot } from "./service";
+import { InputError, internalErrorResponse } from "./errors";
+import { boot } from "./service";
 
 /** Run a route body after boot; input mistakes become 400s with a readable message. */
 export async function handle(fn: () => Promise<unknown>): Promise<Response> {
@@ -10,8 +11,7 @@ export async function handle(fn: () => Promise<unknown>): Promise<Response> {
   } catch (error) {
     if (error instanceof InputError) return Response.json({ error: error.message }, { status: 400 });
     console.error("[opencrewbot]", error);
-    const message = error instanceof Error ? error.message : "Something went wrong.";
-    return Response.json({ error: message }, { status: 500 });
+    return internalErrorResponse();
   }
 }
 
