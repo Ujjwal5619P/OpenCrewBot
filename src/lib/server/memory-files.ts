@@ -1,12 +1,13 @@
-// Each bot's memory is one Markdown file: data/workspaces/<botId>/MEMORY.md.
-// You can open and edit it in any editor; the bot reads it at the start of
-// every turn and changes it through two small tools.
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { WORKSPACES_DIR } from "./config";
+// Individual bot memories live in data/workspaces/<botId>/MEMORY.md. Shared
+// project memory is kept separately in data/PROJECT_MEMORY.md.
+import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, lstatSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join, relative, resolve, sep } from "node:path";
+import { DATA_DIR, WORKSPACES_DIR } from "./config";
 
 /** How much of MEMORY.md goes into the prompt. The file itself can be longer. */
 export const MEMORY_PROMPT_LIMIT = { lines: 200, bytes: 16 * 1024 };
+export const PROJECT_MEMORY_LIMIT = { bytes: 64 * 1024, readBytes: 32 * 1024 };
 
 export function workspaceDir(botId: string): string {
   const dir = join(WORKSPACES_DIR, botId.replace(/[^a-zA-Z0-9_-]/g, ""));
@@ -18,16 +19,35 @@ export function memoryPath(botId: string): string {
   return join(workspaceDir(botId), "MEMORY.md");
 }
 
+export function projectMemoryPath(): string {
+  const root = resolve(DATA_DIR);
+  const path = resolve(root, "PROJECT_MEMORY.md");
+  const rel = relative(root, path);
+  if (rel.startsWith(`..${sep}`) || rel === "..") throw new Error("Invalid project memory path.");
+  return path;
+}
+
 export function readMemory(botId: string): string {
   const path = memoryPath(botId);
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
+export function readProjectMemory(): string {
+  const path = projectMemoryPath();
+  if (!existsSync(path)) return "";
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Project memory must be a regular file.");
+  return readFileSync(path, "utf8");
+}
+
 const SECRET_PATTERNS: RegExp[] = [
   /\b(sk|pk|rk|tvly|ak|ghp|gho|xox[abp])[-_][A-Za-z0-9_-]{12,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  /\bAIza[0-9A-Za-z_-]{30,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-  /\b(password|passwd|secret|api[_-]?key|token)\s*[:=]\s*\S+/gi,
+  /\b(password|passwd|secret|client[_-]?secret|api[_-]?key|token)\s*[:=]\s*\S+/gi,
 ];
 
 /** Bots sometimes "helpfully" remember a key they saw. They don't get to keep it. */
@@ -46,6 +66,65 @@ export function writeMemory(botId: string, content: string): string {
   writeFileSync(tmp, clean, { mode: 0o600 });
   renameSync(tmp, path);
   return clean;
+}
+
+export function writeProjectMemory(content: string): string {
+  const clean = redactSecrets(content);
+  if (Buffer.byteLength(clean, "utf8") > PROJECT_MEMORY_LIMIT.bytes) {
+    throw new RangeError(`Project memory must be ${PROJECT_MEMORY_LIMIT.bytes} bytes or less.`);
+  }
+  const path = projectMemoryPath();
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, clean, { mode: 0o600 });
+    renameSync(tmp, path);
+  } finally {
+    if (existsSync(tmp)) rmSync(tmp, { force: true });
+  }
+  return clean;
+}
+
+export function projectMemoryForAgent(): { text: string; truncated: boolean } {
+  const full = readProjectMemory();
+  const bytes = Buffer.from(full, "utf8");
+  if (bytes.length <= PROJECT_MEMORY_LIMIT.readBytes) return { text: full, truncated: false };
+  const text = bytes.subarray(0, PROJECT_MEMORY_LIMIT.readBytes).toString("utf8").replace(/\uFFFD$/, "");
+  return { text, truncated: true };
+}
+
+export function appendProjectMemoryEntry(input: {
+  note: string;
+  section?: string;
+  source: "user" | "project_decision" | { type: "agent"; botId: string };
+  confidence: "confirmed" | "unverified";
+}): string {
+  const note = input.note.trim().replace(/\s+/g, " ");
+  if (!note) throw new RangeError("A project memory entry cannot be empty.");
+  const section = input.section?.trim().replace(/[\r\n#]+/g, " ").replace(/\s+/g, " ").slice(0, 80);
+  if (typeof input.source !== "string" && !/^[a-zA-Z0-9_-]{1,100}$/.test(input.source.botId)) {
+    throw new RangeError("Invalid project memory source agent.");
+  }
+  const source = typeof input.source === "string"
+    ? input.source === "project_decision" ? "project decision" : "user"
+    : `agent ${input.source.botId}`;
+  const today = new Date().toISOString().slice(0, 10);
+  const entry = `- ${note} _(source: ${source}; confidence: ${input.confidence}; date: ${today})_`;
+  let lines = readProjectMemory().trimEnd().split("\n");
+  if (!lines.length || (lines.length === 1 && !lines[0])) lines = ["# Shared project memory"];
+  if (section) {
+    const heading = `## ${section}`;
+    const index = lines.findIndex((line) => line.trim().toLowerCase() === heading.toLowerCase());
+    if (index >= 0) {
+      let end = index + 1;
+      while (end < lines.length && !/^##\s/.test(lines[end])) end++;
+      lines.splice(end, 0, entry);
+    } else {
+      lines.push("", heading, entry);
+    }
+  } else {
+    lines.push(entry);
+  }
+  return writeProjectMemory(`${lines.join("\n")}\n`);
 }
 
 export function deleteWorkspace(botId: string): void {

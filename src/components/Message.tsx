@@ -36,7 +36,7 @@ type QuestionPart = Extract<Part, { kind: "question" }>;
 function ToolIcon({ name }: { name: string }) {
   const props = { size: 14, className: "shrink-0 text-mute", "aria-hidden": true } as const;
   if (["web_search", "read_page", "crawl_site"].includes(name)) return <Globe {...props} />;
-  if (name.startsWith("memory_")) return <NotebookPen {...props} />;
+  if (name.startsWith("memory_") || name.startsWith("project_memory_")) return <NotebookPen {...props} />;
   if (name.startsWith("browser_")) return <MousePointerClick {...props} />;
   return <Code2 {...props} />;
 }

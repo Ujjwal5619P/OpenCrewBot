@@ -72,7 +72,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       <section className="mt-7">
         <h3 className="text-[12.5px] font-medium text-mute">Data</h3>
         <p className="mt-1 text-[13px] text-mute">
-          Bots, chats and each bot&apos;s <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">MEMORY.md</code> are stored locally in:
+          Bots, chats, private <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">MEMORY.md</code> files and shared <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">PROJECT_MEMORY.md</code> are stored locally in:
         </p>
         <p className="mt-2 rounded-2xl bg-raised px-4 py-3 font-mono text-[12px] break-all text-mute">{status?.dataDir}</p>
       </section>

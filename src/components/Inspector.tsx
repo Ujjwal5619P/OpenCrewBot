@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/lib/client/api";
 import type { Bot, CollaborationMessage, Execution, Room } from "@/lib/shared/types";
 import { BotForm, MemoryEditor } from "./BotForms";
+import { SharedMemoryEditor } from "./SharedMemoryEditor";
 import { ModelPicker } from "./ModelPicker";
 import { RoomForm } from "./RoomForms";
 import { useApp, type InspectorTab } from "./OpenCrewBotApp";
@@ -224,6 +225,7 @@ function BotInspector({ bot, tab, setTab }: { bot: Bot; tab: InspectorTab; setTa
             tabs={[
               { value: "details", label: "Details" },
               { value: "memory", label: "Memory" },
+              { value: "shared-memory", label: "Shared" },
               { value: "browser", label: "Browser" },
             ]}
           />
@@ -232,6 +234,7 @@ function BotInspector({ bot, tab, setTab }: { bot: Bot; tab: InspectorTab; setTa
       <div className="px-5 pb-6">
         {current === "details" && <BotDetails key={bot.id} bot={bot} />}
         {current === "memory" && <MemoryEditor bot={bot} />}
+        {current === "shared-memory" && <SharedMemoryEditor />}
         {current === "browser" && <BrowserView bot={bot} />}
       </div>
     </>
@@ -433,7 +436,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
   const { state, open } = useApp();
   const members = room.memberIds.map((id) => state.bots.find((b) => b.id === id)).filter((b): b is Bot => Boolean(b));
   const running = state.summaries[`room:${room.id}`]?.running ?? [];
-  const current = tab === "settings" || tab === "work" ? tab : "members";
+  const current = tab === "settings" || tab === "work" || tab === "shared-memory" ? tab : "members";
   return (
     <>
       <div className="flex flex-col items-center px-6 pt-2 pb-5 text-center">
@@ -447,6 +450,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
             tabs={[
               { value: "members", label: "Members" },
               { value: "work", label: "Work" },
+              { value: "shared-memory", label: "Shared" },
               { value: "settings", label: "Settings" },
             ]}
           />
@@ -477,6 +481,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
           </ul>
         )}
         {current === "work" && <RoomWork room={room} members={members} />}
+        {current === "shared-memory" && <SharedMemoryEditor />}
         {current === "settings" && <RoomForm key={JSON.stringify(room)} room={room} />}
       </div>
     </>

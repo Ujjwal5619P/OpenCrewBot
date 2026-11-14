@@ -7,10 +7,11 @@ import { createTavilyCrawlTool, createTavilyExtractTool, createTavilySearchTool 
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { z } from "zod";
 import type { Bot, Source } from "@/lib/shared/types";
-import { appendMemory, editMemory } from "./memory-files";
+import { appendMemory, appendProjectMemoryEntry, editMemory, projectMemoryForAgent } from "./memory-files";
 import { publish } from "./bus";
 import { keys } from "./config";
 import { mcpServerNames } from "./connectors";
+import { canAccessProjectMemory } from "./project-memory";
 
 export const CODE_MODE_TOOL = "execute_typescript";
 
@@ -39,6 +40,46 @@ function memoryTools(botId: string): ToolsInput {
         const result = editMemory(botId, find, replace);
         if (result.ok) publish({ type: "memory-changed", botId });
         return result;
+      },
+    }),
+  };
+}
+
+function projectMemoryTools(botId: string): ToolsInput {
+  const requireProjectMemoryAccess = async () => {
+    if (!(await canAccessProjectMemory(botId))) {
+      throw new Error("This agent is not authorized to access shared project memory.");
+    }
+  };
+  return {
+    project_memory_read: createTool({
+      id: "project_memory_read",
+      description:
+        "Read shared project memory. This tool is available only to agents explicitly authorized by the user. Agent-authored entries are marked unverified.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        await requireProjectMemoryAccess();
+        return projectMemoryForAgent();
+      },
+    }),
+    project_memory_add: createTool({
+      id: "project_memory_add",
+      description:
+        "Add one durable note to shared project memory. Available only to explicitly authorized agents. Your entry is always attributed to you and marked unverified; never store secrets.",
+      inputSchema: z.object({
+        note: z.string().trim().min(1).max(4_000),
+        section: z.string().trim().max(80).optional(),
+      }),
+      execute: async ({ note, section }) => {
+        await requireProjectMemoryAccess();
+        appendProjectMemoryEntry({
+          note,
+          section,
+          source: { type: "agent", botId },
+          confidence: "unverified",
+        });
+        publish({ type: "project-memory-changed" });
+        return { saved: true, provenance: `agent ${botId}; unverified` };
       },
     }),
   };
@@ -113,8 +154,10 @@ export function buildTools(bot: Bot): BotToolset {
   const instructions: string[] = [];
   const capabilities: string[] = [];
   Object.assign(tools, collaborationTools(bot.id));
+  Object.assign(tools, projectMemoryTools(bot.id));
   capabilities.push(
     "In group rooms, delegate bounded tasks to room members with delegate_room_work and share research or ask/answer teammates with room_collaborate. These tools are unavailable in direct-message contexts.",
+    "If explicitly authorized, use project_memory_read and project_memory_add to access shared project notes. Your own MEMORY.md remains private; agent-added shared notes are marked unverified.",
   );
 
   if (bot.tools.webSearch && keys.tavily()) {
@@ -155,6 +198,8 @@ const READ_ONLY_VERB = /^(get|list|search|read|fetch|find|view|show|describe|loo
 
 export function toolCategory(toolName: string): ToolCategory | null {
   if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
+  if (toolName === "project_memory_read") return "read";
+  if (toolName === "project_memory_add") return "edit";
   // Composio: looking up actions is free; running them ("multi execute", the remote workbench) asks.
   if (toolName.startsWith("COMPOSIO_")) {
     return /SEARCH_TOOLS|GET_TOOL_SCHEMAS|MANAGE_CONNECTIONS/.test(toolName) ? "read" : "mcp";
@@ -216,6 +261,10 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
       return { label: "Saved to memory", detail: String(a.note ?? "") };
     case "memory_edit":
       return { label: "Updated memory" };
+    case "project_memory_read":
+      return { label: "Read shared project memory" };
+    case "project_memory_add":
+      return { label: "Added to project memory", detail: String(a.note ?? "") };
     case CODE_MODE_TOOL:
       return { label: "Ran code" };
     case "ask_user":

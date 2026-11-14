@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { Bot, ChatMessage, ConversationId, Part, RouteNote } from "@/lib/shared/types";
 import { MASTRA_DB_URL, OWNER_ID, isMock } from "./config";
 import { conversationGeneration, getBot, saveMessage } from "./db";
+import { projectMemoryThreadId } from "./project-memory";
 import { publish } from "./bus";
 import { costUsd, findModel } from "./models";
 import { createMockModel } from "./mock-model";
@@ -165,7 +166,7 @@ async function runtimeFor(bot: Bot): Promise<BotRuntime> {
 async function sessionFor(bot: Bot, conversationId: ConversationId): Promise<Session> {
   const runtime = await runtimeFor(bot);
   const generation = await conversationGeneration(conversationId);
-  const threadId = `${conversationId}:${bot.id}:${generation}`;
+  const threadId = await projectMemoryThreadId(`${conversationId}:${bot.id}:${generation}`, bot.id);
   const k = key(conversationId, bot.id);
   const cached = state.sessions.get(k);
   if (cached && cached.thread.getId() === threadId) return cached;

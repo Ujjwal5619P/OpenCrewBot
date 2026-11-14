@@ -160,6 +160,7 @@ export type ServerEvent =
   | { type: "bots-changed" }
   | { type: "rooms-changed" }
   | { type: "memory-changed"; botId: string }
+  | { type: "project-memory-changed" }
   /** A bot's Browserbase live view opened (url) or closed (null). */
   | { type: "browser-session"; botId: string; liveUrl: string | null }
   | { type: "connections-changed" };

@@ -1,6 +1,6 @@
 // A scripted stand-in for a real model, used when NEBIUS_API_KEY is missing.
 // It streams a short reply and exercises the same paths a real model does:
-// "remember …" calls the memory tool, "search …" calls web search, "ask me …"
+// "remember …" calls a memory tool, "search …" calls web search, "ask me …"
 // asks a question card, and "open <url>" drives the browser (which asks first).
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 
@@ -83,6 +83,10 @@ export function createMockModel(botName: string) {
       const lines = lastUserText(prompt).split("\n").filter(Boolean);
       const personLine = lines.filter((l) => l.startsWith("Person: ")).pop();
       const said = personLine ? personLine.slice("Person: ".length) : (lines.pop() ?? "");
+      const projectRemember = said.match(/(?:remember|save)\s+(?:that\s+)?(.+?)\s+(?:for|to)\s+(?:the\s+)?project\b/i);
+      if (projectRemember && tools.has("project_memory_add")) {
+        return toolCall("project_memory_add", { note: projectRemember[1] });
+      }
       const remember = said.match(/remember (?:that )?(.+)/i);
       if (remember && tools.has("memory_add")) return toolCall("memory_add", { note: remember[1] });
       if (/\bask me\b/i.test(said) && tools.has("ask_user")) {

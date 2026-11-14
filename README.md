@@ -78,7 +78,9 @@ _One message, three bots. Jev picks Atlas to answer, Atlas hands research to Sco
 
 ### Memory
 
-Each bot keeps its notes in one plain Markdown file, `data/workspaces/<botId>/MEMORY.md`. The first 200 lines load into the bot's prompt every turn. The bot adds and fixes lines with two small tools, `memory_add` and `memory_edit`, and you can read or edit the same file in the Memory tab, or in any editor. Anything that looks like a password, token or key is redacted before it's written.
+Each bot keeps private notes in its own plain Markdown file, `data/workspaces/<botId>/MEMORY.md`. The first 200 lines load into that bot's prompt; the bot can update its file with `memory_add` and `memory_edit`, and you can edit it in the Memory tab. Those files are never copied into shared project memory.
+
+The inspector's **Shared** tab edits `data/PROJECT_MEMORY.md` and controls an explicit per-agent access list, which starts empty. Authorized agents can read shared notes on request with `project_memory_read` and add notes with `project_memory_add`; they cannot edit or delete the file. Agent additions are always attributed to the agent and marked **unverified**. The user can add attributed user/project-decision entries and edit the Markdown directly. Common secret-like values are redacted before writing, and the file has a 64 KiB limit. Shared text is sent to a configured model only when an authorized agent reads it. Revoking an agent starts a fresh model-side thread for its future turns; already-disclosed content and an in-flight turn cannot be recalled, and prior local thread history is retained. Existing individual files are not migrated or rewritten.
 
 <div align="center">
 
@@ -113,7 +115,7 @@ _Nothing happens until you choose. Staged example content._
 | Tool | What it does | Powered by |
 | --- | --- | --- |
 | Web search | Search, read pages and crawl sites, with sources shown under the answer | [Tavily](https://tavily.com) via `@mastra/tavily` |
-| Memory | Read and update the bot's own `MEMORY.md` | Local files |
+| Memory | Read and update the bot's own `MEMORY.md`; optionally read/add explicitly shared project notes | Local Markdown files |
 | Code mode | The model writes one TypeScript function that calls several tools at once, so multi-step questions take one round trip | Mastra Code Mode, in a QuickJS (WebAssembly) sandbox |
 | Browser | A real cloud browser for pages that need clicks, forms or JavaScript. Watch it live from the chat and click in to take over | [Browserbase](https://www.browserbase.com) via Mastra `AgentBrowser` |
 | Ask me | Pause and ask you a question with a card in chat | Mastra `ask_user` |
@@ -186,15 +188,17 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 **No keys yet?** Try these in a bot's chat in mock mode:
 
 - `remember that I like short answers` calls the memory tool and writes to `MEMORY.md`.
+- `remember that release freeze is approved for the project` calls the shared-memory tool when that agent has been explicitly authorized.
+- Mock mode uses scripted pattern matching; it exercises local tool routing, not live-model memory decisions.
 - `ask me something` shows a question card and resumes when you answer.
 - `open https://example.com` shows an approval card first, in a bot with the Browser tool on.
 - `search for Nebius Token Factory` runs a real Tavily search once `TAVILY_API_KEY` is set.
 
 ## Data and privacy
 
-Bots, rooms and the chat transcript are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Each bot's memory is `data/workspaces/<botId>/MEMORY.md`. Nothing leaves your machine except calls to the services you configure:
+Bots, rooms and the chat transcript are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Private bot memories are `data/workspaces/<botId>/MEMORY.md`; shared project memory is `data/PROJECT_MEMORY.md`, with its authorized bot IDs stored in the existing SQLite settings table. Nothing leaves your machine except calls to the services you configure:
 
-- **Nebius Token Factory** receives each bot's system prompt (including its `MEMORY.md`), the conversation, and tool results.
+- **Nebius Token Factory** receives each bot's system prompt (including its private `MEMORY.md`), the conversation, and tool results. Shared project memory is included in tool results only after an authorized agent explicitly reads it.
 - **Chief of Staff planning** sends the instruction and available bot role descriptions/instructions to the selected Nebius model. Each assigned bot receives its task and completed dependency outputs.
 - **Tavily** receives search queries and the URLs a bot reads or crawls.
 - **Browserbase** runs the cloud browser, so it sees the pages a bot visits and anything typed into them. Sessions are released when a bot is reset or deleted, and expire after `BROWSERBASE_SESSION_MINUTES`.
@@ -218,7 +222,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
 | Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, hand-offs, bounded task delegation, research sharing, Q&A and verification |
 | Executions | Chief of Staff plans, dependency-aware parallel tasks, retries, cancellation and persistent history |
-| Memory | One `MEMORY.md` per bot, loaded every turn, editable in the app, with secret redaction |
+| Memory | Private `MEMORY.md` per bot plus opt-in shared `PROJECT_MEMORY.md`, editable in the app, with provenance labels and secret redaction |
 | Approvals | Allow once / Deny cards for browser actions, plus ask-you question cards that resume the run |
 | Browser | Browserbase session per bot, embedded live view with takeover, release on reset |
 | Code mode | Multi-tool TypeScript in a QuickJS sandbox with no filesystem or network access |
@@ -245,7 +249,8 @@ Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do
 - `src/lib/server/tools.ts`: which tools a bot gets, their approval categories, and how each looks in chat.
 - `src/lib/server/rooms.ts` and `jev.ts`: room routing, catch-up context and hand-offs.
 - `src/lib/server/collaboration.ts` and `collaboration-core.ts`: room membership, delegation limits, collaboration messages and verification.
-- `src/lib/server/memory-files.ts`: `MEMORY.md` reads, writes, edits and redaction.
+- `src/lib/server/memory-files.ts`: private/shared Markdown memory reads, writes, provenance and redaction.
+- `src/lib/server/project-memory.ts`: the persisted allowlist for shared project memory.
 - `src/lib/server/browserbase.ts`: creates, announces and releases each bot's Browserbase session.
 - `src/lib/server/mock-model.ts`: the scripted model used without a Nebius key.
 - `src/components/`: the chat interface. `src/lib/client/store.ts` folds server events into state.

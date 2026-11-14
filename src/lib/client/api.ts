@@ -49,6 +49,17 @@ export const api = {
   deleteBot: (id: string) => call(`/api/bots/${id}`, { method: "DELETE" }),
   getMemory: (id: string) => call<{ content: string; path: string; limit: { lines: number; bytes: number } }>(`/api/bots/${id}/memory`),
   saveMemory: (id: string, content: string) => call<{ content: string }>(`/api/bots/${id}/memory`, { method: "PUT", json: { content } }),
+  getProjectMemory: () =>
+    call<{ content: string; path: string; authorizedBotIds: string[]; limit: { bytes: number; readBytes: number } }>("/api/project-memory"),
+  saveProjectMemory: (content: string) =>
+    call<{ content: string }>("/api/project-memory", { method: "PUT", json: { content } }),
+  addProjectMemoryEntry: (entry: { note: string; section?: string; source: "user" | "project_decision"; confidence: "confirmed" | "unverified" }) =>
+    call<{ content: string }>("/api/project-memory", { method: "POST", json: entry }),
+  setProjectMemoryAccess: (authorizedBotIds: string[], expectedAuthorizedBotIds: string[]) =>
+    call<{ authorizedBotIds: string[] }>("/api/project-memory", {
+      method: "PATCH",
+      json: { authorizedBotIds, expectedAuthorizedBotIds },
+    }),
   createRoom: (input: RoomInput) => call<{ room: Room }>("/api/rooms", { method: "POST", json: input }),
   updateRoom: (id: string, patch: Partial<RoomInput>) => call<{ room: Room }>(`/api/rooms/${id}`, { method: "PATCH", json: patch }),
   deleteRoom: (id: string) => call(`/api/rooms/${id}`, { method: "DELETE" }),

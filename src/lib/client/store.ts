@@ -15,6 +15,8 @@ export interface AppState {
   active: ConversationId | null;
   /** Bumped when a bot's MEMORY.md changes, so an open memory editor can refresh. */
   memoryVersion: Record<string, number>;
+  /** Bumped when shared project memory or its access list changes. */
+  projectMemoryVersion: number;
   /** Finished bot replies already counted toward unread badges. */
   counted: Record<string, true>;
   /** botId → Browserbase live view of that bot's open browser. */
@@ -33,6 +35,7 @@ export const initialState: AppState = {
   transcripts: {},
   active: null,
   memoryVersion: {},
+  projectMemoryVersion: 0,
   counted: {},
   liveViews: {},
   connectionsVersion: 0,
@@ -158,6 +161,8 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
     }
     case "memory-changed":
       return { ...state, memoryVersion: { ...state.memoryVersion, [event.botId]: (state.memoryVersion[event.botId] ?? 0) + 1 } };
+    case "project-memory-changed":
+      return { ...state, projectMemoryVersion: state.projectMemoryVersion + 1 };
     case "browser-session": {
       const liveViews = { ...state.liveViews };
       if (event.liveUrl) liveViews[event.botId] = event.liveUrl;
