@@ -2,7 +2,15 @@
 // its own store (mastra.db) for each bot's model-facing thread history.
 import { createClient, type Client } from "@libsql/client";
 import { APP_DB_URL } from "./config";
-import type { Bot, ChatMessage, ConversationId, Execution, ExecutionTask, Room } from "@/lib/shared/types";
+import type {
+  Bot,
+  ChatMessage,
+  CollaborationMessage,
+  ConversationId,
+  Execution,
+  ExecutionTask,
+  Room,
+} from "@/lib/shared/types";
 
 // Cached across hot reloads, together with the file it points at, so a
 // changed database path opens a fresh connection instead of reusing one
@@ -10,7 +18,7 @@ import type { Bot, ChatMessage, ConversationId, Execution, ExecutionTask, Room }
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 async function open(): Promise<Client> {
   const db = createClient({ url: APP_DB_URL });
@@ -62,6 +70,49 @@ async function open(): Promise<Client> {
       ],
       "write",
     );
+  }
+  if (version < 4) {
+    const columns = await db.execute("PRAGMA table_info(executions)");
+    if (!columns.rows.some((row) => String(row.name) === "room_id")) {
+      await db.execute("ALTER TABLE executions ADD COLUMN room_id TEXT");
+    }
+    if (!columns.rows.some((row) => String(row.name) === "parent_execution_id")) {
+      await db.execute("ALTER TABLE executions ADD COLUMN parent_execution_id TEXT");
+    }
+    if (!columns.rows.some((row) => String(row.name) === "pattern_key")) {
+      await db.execute("ALTER TABLE executions ADD COLUMN pattern_key TEXT");
+    }
+    await db.batch(
+      [
+        `CREATE TABLE IF NOT EXISTS collaboration_messages (
+          id TEXT PRIMARY KEY,
+          room_id TEXT NOT NULL,
+          execution_id TEXT,
+          type TEXT NOT NULL,
+          response_to_id TEXT,
+          created_at TEXT NOT NULL,
+          data TEXT NOT NULL
+        )`,
+        "CREATE INDEX IF NOT EXISTS executions_by_room ON executions (room_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS collaboration_messages_by_room ON collaboration_messages (room_id, created_at)",
+      ],
+      "write",
+    );
+    const messageColumns = await db.execute("PRAGMA table_info(collaboration_messages)");
+    if (!messageColumns.rows.some((row) => String(row.name) === "type")) {
+      await db.execute("ALTER TABLE collaboration_messages ADD COLUMN type TEXT NOT NULL DEFAULT 'research'");
+    }
+    if (!messageColumns.rows.some((row) => String(row.name) === "response_to_id")) {
+      await db.execute("ALTER TABLE collaboration_messages ADD COLUMN response_to_id TEXT");
+    }
+    await db.execute(
+      "CREATE UNIQUE INDEX IF NOT EXISTS one_collaboration_answer ON collaboration_messages (response_to_id) WHERE response_to_id IS NOT NULL AND type = 'answer'",
+    );
+    await db.execute("CREATE INDEX IF NOT EXISTS executions_by_parent ON executions (parent_execution_id, status)");
+    await db.execute(
+      "CREATE UNIQUE INDEX IF NOT EXISTS one_active_room_delegation_pattern ON executions (room_id, pattern_key) WHERE pattern_key IS NOT NULL AND status IN ('pending', 'running')",
+    );
+    await db.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (4, ?)", [new Date().toISOString()]);
   }
   return db;
 }
@@ -236,18 +287,41 @@ function decodeExecution(header: string, status: string, tasks: ExecutionTask[])
   return { ...(JSON.parse(header) as Omit<Execution, "tasks">), status: status as Execution["status"], tasks };
 }
 
-export async function saveExecution(execution: Execution): Promise<void> {
+export async function saveExecution(execution: Execution, collaborationMessages: CollaborationMessage[] = []): Promise<void> {
   const client = await db();
   const statements = [
     {
-      sql: `INSERT INTO executions (id, status, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, data = excluded.data`,
-      args: [execution.id, execution.status, execution.createdAt, new Date().toISOString(), JSON.stringify(executionHeader(execution))],
+      sql: `INSERT INTO executions (id, status, created_at, updated_at, data, room_id, parent_execution_id, pattern_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, data = excluded.data, room_id = excluded.room_id, parent_execution_id = excluded.parent_execution_id, pattern_key = excluded.pattern_key`,
+      args: [
+        execution.id,
+        execution.status,
+        execution.createdAt,
+        new Date().toISOString(),
+        JSON.stringify(executionHeader(execution)),
+        execution.collaboration?.roomId ?? null,
+        execution.collaboration?.parentExecutionId ?? null,
+        execution.collaboration?.patternKey ?? null,
+      ],
     },
     { sql: "DELETE FROM execution_tasks WHERE execution_id = ?", args: [execution.id] },
     ...execution.tasks.map((task) => ({
       sql: "INSERT INTO execution_tasks (id, execution_id, status, created_at, data) VALUES (?, ?, ?, ?, ?)",
       args: [`${execution.id}:${task.id}`, execution.id, task.status, task.createdAt, JSON.stringify(task)],
+    })),
+    ...collaborationMessages.map((message) => ({
+      sql: `INSERT INTO collaboration_messages (id, room_id, execution_id, type, response_to_id, created_at, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET type = excluded.type, response_to_id = excluded.response_to_id, data = excluded.data`,
+      args: [
+        message.id,
+        message.roomId,
+        message.executionId ?? null,
+        message.type,
+        message.responseToMessageId ?? null,
+        message.createdAt,
+        JSON.stringify(message),
+      ],
     })),
   ];
   await client.batch(statements, "write");
@@ -284,6 +358,107 @@ export async function listExecutions(limit = 50): Promise<Execution[]> {
       );
     }),
   );
+}
+
+export async function listRoomExecutions(roomId: string): Promise<Execution[]> {
+  const client = await db();
+  const rows = await client.execute({
+    sql: "SELECT id, status, data FROM executions WHERE room_id = ? ORDER BY created_at DESC LIMIT 50",
+    args: [roomId],
+  });
+  return Promise.all(
+    rows.rows.map(async (row) => {
+      const taskRows = await client.execute({
+        sql: "SELECT data FROM execution_tasks WHERE execution_id = ? ORDER BY created_at, id",
+        args: [String(row.id)],
+      });
+      return decodeExecution(
+        String(row.data),
+        String(row.status),
+        taskRows.rows.map((task) => JSON.parse(String(task.data)) as ExecutionTask),
+      );
+    }),
+  );
+}
+
+export async function listChildExecutions(parentExecutionId: string): Promise<Execution[]> {
+  const client = await db();
+  const rows = await client.execute({
+    sql: "SELECT id, status, data FROM executions WHERE parent_execution_id = ? ORDER BY created_at",
+    args: [parentExecutionId],
+  });
+  return Promise.all(
+    rows.rows.map(async (row) => {
+      const taskRows = await client.execute({
+        sql: "SELECT data FROM execution_tasks WHERE execution_id = ? ORDER BY created_at, id",
+        args: [String(row.id)],
+      });
+      return decodeExecution(
+        String(row.data),
+        String(row.status),
+        taskRows.rows.map((task) => JSON.parse(String(task.data)) as ExecutionTask),
+      );
+    }),
+  );
+}
+
+export async function hasActiveRoomPattern(roomId: string, patternKey: string): Promise<boolean> {
+  const rows = await (await db()).execute({
+    sql: "SELECT 1 FROM executions WHERE room_id = ? AND pattern_key = ? AND status IN ('pending', 'running') LIMIT 1",
+    args: [roomId, patternKey],
+  });
+  return rows.rows.length > 0;
+}
+
+export async function saveCollaborationMessage(message: CollaborationMessage): Promise<void> {
+  await (await db()).execute({
+    sql: `INSERT INTO collaboration_messages (id, room_id, execution_id, type, response_to_id, created_at, data)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET type = excluded.type, response_to_id = excluded.response_to_id, data = excluded.data`,
+    args: [
+      message.id,
+      message.roomId,
+      message.executionId ?? null,
+      message.type,
+      message.responseToMessageId ?? null,
+      message.createdAt,
+      JSON.stringify(message),
+    ],
+  });
+}
+
+export async function getCollaborationMessage(id: string): Promise<CollaborationMessage | null> {
+  const rows = await (await db()).execute({
+    sql: "SELECT data FROM collaboration_messages WHERE id = ?",
+    args: [id],
+  });
+  return rows.rows[0] ? (JSON.parse(String(rows.rows[0].data)) as CollaborationMessage) : null;
+}
+
+export async function hasCollaborationAnswer(questionId: string): Promise<boolean> {
+  const rows = await (await db()).execute({
+    sql: "SELECT 1 FROM collaboration_messages WHERE response_to_id = ? AND type = 'answer' LIMIT 1",
+    args: [questionId],
+  });
+  return rows.rows.length > 0;
+}
+
+export async function listCollaborationMessages(roomId: string, limit = 100): Promise<CollaborationMessage[]> {
+  const rows = await (await db()).execute({
+    sql: `SELECT data FROM (
+            SELECT data, created_at FROM collaboration_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?
+          ) ORDER BY created_at ASC`,
+    args: [roomId, Math.max(1, Math.min(200, Math.floor(limit)))],
+  });
+  return rows.rows.map((row) => JSON.parse(String(row.data)) as CollaborationMessage);
+}
+
+export async function countRecentCollaborationMessages(roomId: string, since: string): Promise<number> {
+  const result = await (await db()).execute({
+    sql: "SELECT COUNT(*) AS count FROM collaboration_messages WHERE room_id = ? AND created_at >= ?",
+    args: [roomId, since],
+  });
+  return Number(result.rows[0]?.count ?? 0);
 }
 
 export async function claimExecution(id: string): Promise<boolean> {

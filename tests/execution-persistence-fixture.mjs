@@ -43,6 +43,13 @@ async function main() {
     output: "## Research\nVerified notes",
     createdAt: "2026-01-01T00:00:00.000Z",
     completedAt: "2026-01-01T00:00:02.000Z",
+    collaboration: {
+      roomId: "room-a",
+      rootExecutionId: "history-check",
+      depth: 1,
+      delegatorBotId: "bot-a",
+      path: [],
+    },
   };
 
   await store.saveExecution(execution);
@@ -51,7 +58,37 @@ async function main() {
     id: "second-history-check",
     instruction: "Another execution",
     tasks: execution.tasks.map((task) => ({ ...task, output: "Second execution output" })),
+    collaboration: { ...execution.collaboration, parentExecutionId: execution.id, depth: 2 },
   });
+  const roomExecutions = await store.listRoomExecutions("room-a");
+  const childExecutions = await store.listChildExecutions(execution.id);
+  const question = {
+    id: "question-check",
+    roomId: "room-a",
+    type: "question",
+    authorBotId: "bot-a",
+    recipientBotId: "bot-b",
+    content: "Can you verify this?",
+    createdAt: "2026-01-01T00:00:03.000Z",
+  };
+  await store.saveCollaborationMessage(question);
+  const answer = {
+    id: "answer-check",
+    roomId: "room-a",
+    type: "answer",
+    authorBotId: "bot-b",
+    responseToMessageId: question.id,
+    content: "Yes, I checked it.",
+    createdAt: "2026-01-01T00:00:04.000Z",
+  };
+  await store.saveCollaborationMessage(answer);
+  let duplicateAnswerRejected = false;
+  try {
+    await store.saveCollaborationMessage({ ...answer, id: "second-answer-check" });
+  } catch {
+    duplicateAnswerRejected = true;
+  }
+  const collaborationMessages = await store.listCollaborationMessages("room-a");
   await store.saveExecution({
     ...execution,
     id: "interrupted-check",
@@ -79,6 +116,21 @@ async function main() {
   const migration = await secondClient.execute("SELECT MAX(version) AS version FROM schema_migrations");
   await secondClient.close();
   delete globalThis.__opencrewbotDb;
+  const activePatternExecution = {
+    ...execution,
+    id: "pattern-one",
+    status: "pending",
+    tasks: [],
+    collaboration: { ...execution.collaboration, patternKey: "same-delegation" },
+  };
+  await store.saveExecution(activePatternExecution);
+  let duplicatePatternRejected = false;
+  try {
+    await store.saveExecution({ ...activePatternExecution, id: "pattern-two" });
+  } catch {
+    duplicatePatternRejected = true;
+  }
+  await store.saveExecution({ ...activePatternExecution, status: "completed" });
   process.stdout.write(
     JSON.stringify({
       status: restored.status,
@@ -88,6 +140,11 @@ async function main() {
       recoveredStatuses,
       claimResults: claims.sort(),
       schemaVersion: Number(migration.rows[0].version),
+      roomExecutionIds: roomExecutions.map((item) => item.id).sort(),
+      childExecutionIds: childExecutions.map((item) => item.id),
+      collaborationMessageTypes: collaborationMessages.map((item) => item.type),
+      duplicateAnswerRejected,
+      duplicatePatternRejected,
     }),
   );
 }

@@ -1,7 +1,7 @@
 // Group rooms: decide who answers, give each bot the part of the room it
 // hasn't seen, and let a bot hand off to a teammate by @mentioning them.
 import type { Bot, ChatMessage, Room, RouteNote } from "@/lib/shared/types";
-import { listBots, listMessages } from "./db";
+import { listBots, listCollaborationMessages, listMessages } from "./db";
 import { pickResponders } from "./jev";
 import { runTurn, stopEpochOf } from "./runtime";
 
@@ -46,19 +46,27 @@ function catchUp(history: ChatMessage[], bot: Bot, bots: Map<string, Bot>): stri
     .map((m) => `${authorName(m, bots)}: ${messageText(m) || "(no text)"}`);
 }
 
-function roomPrompt(room: Room, bot: Bot, members: Bot[], lines: string[], handoff: boolean): string {
+function roomPrompt(
+  room: Room,
+  bot: Bot,
+  members: Bot[],
+  lines: string[],
+  collaborationLines: string[],
+  handoff: boolean,
+): string {
   const roster = members
-    .map((b) => `- ${b.name} (@${b.handle})${b.title ? `, ${b.title}` : ""}${b.id === bot.id ? " (you)" : ""}`)
+    .map((b) => `- ${b.name} (ID: ${b.id}, @${b.handle})${b.title ? `, ${b.title}` : ""}${b.id === bot.id ? " (you)" : ""}`)
     .join("\n");
   return [
     `[Group room "${room.name}"${room.topic ? `, topic: ${room.topic}` : ""}]`,
     `Members:\n${roster}`,
     `New in the room since your last message:\n${lines.join("\n") || "(nothing new)"}`,
+    `Collaboration messages:\n${collaborationLines.join("\n") || "(none)"}`,
     "---",
     handoff
       ? `A teammate @mentioned you. Do the part they asked of you, as ${bot.name}.`
       : `Reply to the latest message as ${bot.name}.`,
-    "Add only your part; don't repeat what teammates already said. To hand something to a teammate, @mention their handle.",
+    "Add only your part; don't repeat what teammates already said. Delegate structured work with delegate_room_work; use room_collaborate to share research or ask and answer members. Delegation is bounded, and every assigned bot still follows its own approval permissions.",
   ].join("\n\n");
 }
 
@@ -98,10 +106,15 @@ export async function runRoom(room: Room, userMessage: ChatMessage): Promise<voi
   while (queue.length && stopEpochOf(conversationId) === epoch) {
     const { bot, route: note, depth } = queue.shift()!;
     const transcript = await listMessages(conversationId, 60);
+    const collaborationLines = (await listCollaborationMessages(room.id, 30)).slice(-20).map((message) => {
+      const author = bots.get(message.authorBotId)?.name ?? "Former member";
+      const recipient = message.recipientBotId ? ` to ${bots.get(message.recipientBotId)?.name ?? message.recipientBotId}` : "";
+      return `[${message.type}${recipient}; messageId=${message.id}] ${author}: ${message.content.slice(0, 1200)}`;
+    });
     const reply = await runTurn({
       bot,
       conversationId,
-      content: roomPrompt(room, bot, members, catchUp(transcript, bot, bots), note.by === "handoff"),
+      content: roomPrompt(room, bot, members, catchUp(transcript, bot, bots), collaborationLines, note.by === "handoff"),
       route: note,
     });
     if (!reply || reply.status !== "done" || depth >= MAX_HANDOFF_DEPTH) continue;

@@ -38,6 +38,11 @@ test("creates pending tasks with approval requirements and validates bot assignm
   assert.equal(task.sideEffectsPossible, false);
   assert.equal(task.approvalRequired, true);
   assert.equal(task.createdAt, "2026-01-01T00:00:00.000Z");
+  const fullAccessTask = createExecutionTasks(
+    [{ id: "full", title: "Full access", description: "Do the work", assignedBotId: "bot-b", requiredCapabilities: [], dependencies: [] }],
+    [{ id: "bot-b", approval: "full" }],
+  )[0];
+  assert.equal(fullAccessTask.approvalRequired, false);
   assert.throws(
     () =>
       createExecutionTasks(
@@ -54,6 +59,31 @@ test("creates pending tasks with approval requirements and validates bot assignm
       ),
     /unavailable bot/,
   );
+});
+
+test("serializes work sharing a bot lock while allowing different bots to overlap", async () => {
+  const withLock = createKeyedLock();
+  let active = 0;
+  let sameBotPeak = 0;
+  const sameBot = (value) => withLock("browser-bot", async () => {
+    active += 1;
+    sameBotPeak = Math.max(sameBotPeak, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+    return value;
+  });
+  assert.deepEqual(await Promise.all([sameBot(1), sameBot(2)]), [1, 2]);
+  assert.equal(sameBotPeak, 1);
+
+  let differentBotPeak = 0;
+  const differentBot = (key) => withLock(key, async () => {
+    active += 1;
+    differentBotPeak = Math.max(differentBotPeak, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+  });
+  await Promise.all([differentBot("bot-a"), differentBot("bot-b")]);
+  assert.equal(differentBotPeak, 2);
 });
 
 test("rejects unknown and circular dependencies", () => {

@@ -6,8 +6,10 @@ import type {
   ChatMessage,
   ComposioApp,
   ConnectionsState,
+  CollaborationMessage,
   ConversationId,
   ConversationSummary,
+  Execution,
   McpServer,
   ModelOption,
   Room,
@@ -50,6 +52,9 @@ export const api = {
   createRoom: (input: RoomInput) => call<{ room: Room }>("/api/rooms", { method: "POST", json: input }),
   updateRoom: (id: string, patch: Partial<RoomInput>) => call<{ room: Room }>(`/api/rooms/${id}`, { method: "PATCH", json: patch }),
   deleteRoom: (id: string) => call(`/api/rooms/${id}`, { method: "DELETE" }),
+  roomCollaboration: (id: string) =>
+    call<{ executions: Execution[]; messages: CollaborationMessage[] }>(`/api/rooms/${id}/collaboration`),
+  cancelExecution: (id: string) => call(`/api/executions/${id}/cancel`, { method: "POST" }),
   messages: (id: ConversationId) => call<{ messages: ChatMessage[]; running: string[] }>(`${conv(id)}/messages`),
   send: (id: ConversationId, text: string) => call<{ message: ChatMessage }>(`${conv(id)}/messages`, { method: "POST", json: { text } }),
   approve: (id: ConversationId, botId: string, toolCallId: string, approve: boolean) =>

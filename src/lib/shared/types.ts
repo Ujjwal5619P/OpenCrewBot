@@ -240,6 +240,13 @@ export interface ExecutionTask {
   completedAt?: string;
   retryCount: number;
   approvalRequired: boolean;
+  collaboration?: {
+    objective: string;
+    context: string;
+    expectedOutput: string;
+    verificationOfTaskId?: string;
+    verificationStatus?: "accepted" | "needs_revision" | "inconclusive";
+  };
 }
 
 export interface Execution {
@@ -255,4 +262,47 @@ export interface Execution {
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
+  collaboration?: {
+    roomId: string;
+    parentExecutionId?: string;
+    rootExecutionId: string;
+    depth: number;
+    delegatorBotId: string;
+    path: string[];
+    patternKey?: string;
+  };
+}
+
+export type CollaborationMessageType =
+  | "delegation"
+  | "delegation_rejected"
+  | "task_output"
+  | "research"
+  | "question"
+  | "answer"
+  | "verification_request"
+  | "verification_result";
+
+export interface CollaborationMessage {
+  id: string;
+  roomId: string;
+  executionId?: string;
+  taskId?: string;
+  type: CollaborationMessageType;
+  authorBotId: string;
+  recipientBotId?: string;
+  responseToMessageId?: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface CollaborationTaskSpec {
+  id: string;
+  title: string;
+  objective: string;
+  context: string;
+  expectedOutput: string;
+  assignedBotId: string;
+  dependencies: string[];
+  verificationOfTaskId?: string;
 }

@@ -58,6 +58,12 @@ With `NEBIUS_API_KEY`, the app uses the configured Nebius model for live structu
 
 Put bots in a room and talk to all of them at once. @mention a bot to choose who answers, or `@everyone`. With no mention, an **Auto** room asks [Jev](https://typesafe.ai), TypeSafe's decision model, to pick the best bot in a few hundred milliseconds. If Jev isn't sure, the room's lead answers. A bot can @mention a teammate to hand work on, up to two hops.
 
+Room agents also have collaboration tools to share research, ask and answer member questions, and delegate structured tasks with an objective, context, expected output, assignee and dependencies. Addressed questions start a bounded answer task for that room member. Independent delegated tasks use the existing execution scheduler in parallel; dependent tasks wait for their prerequisites. A reviewer can be assigned a verification task, whose result is recorded only when the reviewer returns an explicit first-line verdict. Open a room's **Work** tab to see task owners, statuses, intermediate outputs, exchanges and verification results; approval and ask-you prompts can be answered there without changing the bot's permissions.
+
+Delegation is limited to room members, 20 tasks per plan, three delegation levels and 60 collaboration messages per room per hour. Repeated delegation patterns in the same chain are rejected with a recorded reason. Delegated work uses each bot's existing `runTurn()` and approval policy; delegation does not grant tool permissions. Live models can choose to use these tools. Mock mode is scripted and does not reliably demonstrate autonomous delegation, so confirm that work appears in the room's Work tab before treating it as started.
+
+Delegated plans, outputs and collaboration messages are persisted with the execution history. Pending work resumes during startup recovery; interrupted tasks with possible external effects become `outcome_unknown`. Approval or question waits resume normally while the server is running, but a server restart cannot resume the suspended in-memory approval flow and fails that task closed.
+
 <div align="center">
 
 <table><tr><td>
@@ -193,6 +199,7 @@ Bots, rooms and the chat transcript are stored in SQLite at `data/opencrewbot.db
 - **Tavily** receives search queries and the URLs a bot reads or crawls.
 - **Browserbase** runs the cloud browser, so it sees the pages a bot visits and anything typed into them. Sessions are released when a bot is reset or deleted, and expire after `BROWSERBASE_SESSION_MINUTES`.
 - **Jev** receives the room name, member names and descriptions, the last few room messages and the new message, when an Auto room has no @mention.
+- **Room collaboration** stores delegated tasks, intermediate outputs, research shares, questions, answers and verification results in the local SQLite database. These messages are included in room context sent to configured bot models.
 - **Composio** holds the sign-ins for apps you connect, and receives the actions a bot runs in them.
 - **Your MCP servers** receive the tool calls a bot makes to them. Their URLs and tokens are stored in `data/opencrewbot.db`.
 
@@ -209,7 +216,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Models | Model sheet with suggested picks, search and the live Token Factory catalog; switch without a restart; tokens and cost on every reply |
 | Connections | Composio apps with one-click sign-in, your own MCP servers (GitHub preset), per-bot access, approval for actions |
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
-| Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, bot-to-bot hand-offs |
+| Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, hand-offs, bounded task delegation, research sharing, Q&A and verification |
 | Executions | Chief of Staff plans, dependency-aware parallel tasks, retries, cancellation and persistent history |
 | Memory | One `MEMORY.md` per bot, loaded every turn, editable in the app, with secret redaction |
 | Approvals | Allow once / Deny cards for browser actions, plus ask-you question cards that resume the run |
@@ -237,6 +244,7 @@ Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do
 - `src/lib/server/execution-core.ts`: dependency validation, retries and bounded parallel task execution.
 - `src/lib/server/tools.ts`: which tools a bot gets, their approval categories, and how each looks in chat.
 - `src/lib/server/rooms.ts` and `jev.ts`: room routing, catch-up context and hand-offs.
+- `src/lib/server/collaboration.ts` and `collaboration-core.ts`: room membership, delegation limits, collaboration messages and verification.
 - `src/lib/server/memory-files.ts`: `MEMORY.md` reads, writes, edits and redaction.
 - `src/lib/server/browserbase.ts`: creates, announces and releases each bot's Browserbase session.
 - `src/lib/server/mock-model.ts`: the scripted model used without a Nebius key.

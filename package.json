@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs tests/agent-creation.test.mjs"
+    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs tests/agent-creation.test.mjs tests/collaboration-core.test.mjs tests/collaboration-integration.test.mjs"
   },
   "dependencies": {
     "@composio/core": "^0.23.0",

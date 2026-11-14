@@ -19,7 +19,12 @@ test("stores execution history in the versioned SQLite database", () => {
       historyCount: 4,
       recoveredStatuses: ["outcome_unknown", "failed", "cancelled"],
       claimResults: [false, true],
-      schemaVersion: 3,
+      schemaVersion: 4,
+      roomExecutionIds: ["history-check", "second-history-check"],
+      childExecutionIds: ["second-history-check"],
+      collaborationMessageTypes: ["question", "answer"],
+      duplicateAnswerRejected: true,
+      duplicatePatternRejected: true,
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });

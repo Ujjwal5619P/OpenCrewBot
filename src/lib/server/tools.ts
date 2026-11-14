@@ -53,6 +53,53 @@ function webTools(): ToolsInput {
   };
 }
 
+function collaborationTools(botId: string): ToolsInput {
+  return {
+    delegate_room_work: createTool({
+      id: "delegate_room_work",
+      description:
+        "Delegate structured subtasks to room members. Each task must include its objective, context, expected output, assigned room-member bot ID, and dependencies. Independent tasks may run in parallel. For a verification task, set verificationOfTaskId and depend on the task being reviewed. Delegated bots keep their own approval permissions.",
+      inputSchema: z.object({
+        tasks: z.array(
+          z.object({
+            id: z.string().describe("Unique short ID within this delegation."),
+            title: z.string(),
+            objective: z.string(),
+            context: z.string(),
+            expectedOutput: z.string(),
+            assignedBotId: z.string().describe("ID, not handle, of a room member."),
+            dependencies: z.array(z.string()),
+            verificationOfTaskId: z.string().optional(),
+          }),
+        ),
+      }),
+      execute: async (input, context) => {
+        const threadId = context.agent?.threadId;
+        if (!threadId) return { error: "Delegation requires an active room task." };
+        const collaboration = await import("./collaboration");
+        return collaboration.delegateRoomWork(botId, threadId, input, context.abortSignal);
+      },
+    }),
+    room_collaborate: createTool({
+      id: "room_collaborate",
+      description:
+        "Share research or exchange a question and answer with a room member. Use research to preserve findings; use question with a recipientBotId; answer must reference the question's messageId.",
+      inputSchema: z.object({
+        type: z.enum(["research", "question", "answer"]),
+        content: z.string(),
+        recipientBotId: z.string().optional(),
+        responseToMessageId: z.string().optional(),
+      }),
+      execute: async (input, context) => {
+        const threadId = context.agent?.threadId;
+        if (!threadId) return { error: "Room messages require an active room task." };
+        const collaboration = await import("./collaboration");
+        return collaboration.sendRoomCollaborationMessage(botId, threadId, input, context.abortSignal);
+      },
+    }),
+  };
+}
+
 export interface BotToolset {
   tools: ToolsInput;
   /** Extra prompt text the tools need (Code Mode's function stubs). */
@@ -65,6 +112,10 @@ export function buildTools(bot: Bot): BotToolset {
   const tools: ToolsInput = {};
   const instructions: string[] = [];
   const capabilities: string[] = [];
+  Object.assign(tools, collaborationTools(bot.id));
+  capabilities.push(
+    "In group rooms, delegate bounded tasks to room members with delegate_room_work and share research or ask/answer teammates with room_collaborate. These tools are unavailable in direct-message contexts.",
+  );
 
   if (bot.tools.webSearch && keys.tavily()) {
     Object.assign(tools, webTools());
@@ -169,6 +220,10 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
       return { label: "Ran code" };
     case "ask_user":
       return { label: "Asked you" };
+    case "delegate_room_work":
+      return { label: "Delegated room tasks" };
+    case "room_collaborate":
+      return { label: "Shared with room" };
     default:
       if (name.startsWith("browser_")) {
         const action = name.slice("browser_".length).replace(/_/g, " ");
