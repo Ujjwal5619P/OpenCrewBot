@@ -4,10 +4,11 @@ import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, BotInput } from "@/lib/shared/types";
+import type { Bot, BotInput, SkillSummary } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Drawer, Field, Mascot, Segmented, Toggle, inputClass } from "./ui";
+import { useConnections } from "@/lib/client/use-connections";
 
 export const BOT_COLORS = ["#3b82f6", "#f59e0b", "#ec4899", "#22c55e", "#8b5cf6", "#14b8a6", "#ef4444", "#eab308", "#f4f4f4"];
 
@@ -55,12 +56,48 @@ export function ColorPicker({ value, onChange }: { value: string; onChange: (c: 
 export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue?: BotInput; onDone?: (bot: Bot) => void }) {
   const { state, open, toast } = useApp();
   const defaultModel = state.models.find((m) => m.id === "MiniMaxAI/MiniMax-M3")?.id ?? state.models[0]?.id ?? "MiniMaxAI/MiniMax-M3";
+  const { options: connectionOptions } = useConnections(state.connectionsVersion);
   const [initial, setInitial] = useState<BotInput>(() => (bot ? { ...bot } : initialValue ? { ...initialValue } : blankBot(defaultModel)));
   const [form, setForm] = useState<BotInput>(initial);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [skillCatalog, setSkillCatalog] = useState<SkillSummary[]>([]);
+  const [skillLoadError, setSkillLoadError] = useState<string | null>(null);
   const keys = state.status?.keys;
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
+  const modelSupportsTools = state.models.find((model) => model.id === form.model)?.tools ?? false;
+  const availableSkillTools = new Set<string>();
+  if (modelSupportsTools && form.tools.webSearch && keys?.tavily) {
+    availableSkillTools.add("web_search");
+    availableSkillTools.add("read_page");
+  }
+  if (modelSupportsTools && form.tools.codeMode) availableSkillTools.add("execute_typescript");
+  if (
+    modelSupportsTools &&
+    keys?.composio &&
+    (form.connections ?? []).some((id) => id.startsWith("composio:")) &&
+    connectionOptions.some((option) => option.kind === "composio" && (form.connections ?? []).includes(option.id))
+  ) {
+    availableSkillTools.add("COMPOSIO_MULTI_EXECUTE_TOOL");
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .skills()
+      .then(({ skills }) => {
+        if (!cancelled) {
+          setSkillCatalog(skills);
+          setSkillLoadError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setSkillLoadError(error instanceof Error ? error.message : "Couldn't load the skill library.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const set = <K extends keyof BotInput>(k: K, v: BotInput[K]) => {
     setErrorMessage(null);
@@ -162,6 +199,36 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
             placeholder="Research before answering anything time-sensitive. Cite the URLs you used."
           />
         </Field>
+
+        <div>
+          <span className="mb-1.5 block text-[12.5px] font-medium text-mute">Reusable skills</span>
+          <p className="mb-2 text-[12px] leading-relaxed text-faint">
+            Select skills this bot can load on demand. Skills provide guidance only; they never add tools or change approval permissions.
+          </p>
+          {skillLoadError && <p role="alert" className="mb-2 rounded-xl bg-danger-soft px-3 py-2 text-[12px] text-danger">{skillLoadError}</p>}
+          <div className="divide-y divide-line rounded-2xl bg-raised px-4">
+            {skillCatalog.map((skill) => {
+              const missing = skill.requiredTools.filter((tool) => !availableSkillTools.has(tool));
+              const requirement = skill.requiredTools.length ? `Requires: ${skill.requiredTools.join(", ")}.` : "No external tools required.";
+              const status = missing.length ? `Not executable now; missing: ${missing.join(", ")}.` : "Executable with the current tool configuration.";
+              return (
+                <Toggle
+                  key={skill.id}
+                  label={skill.name}
+                  hint={`${skill.description} ${requirement} ${status}`}
+                  checked={(form.skillIds ?? []).includes(skill.id)}
+                  onChange={(on) => {
+                    const selected = new Set(form.skillIds ?? []);
+                    if (on) selected.add(skill.id);
+                    else selected.delete(skill.id);
+                    set("skillIds", [...selected]);
+                  }}
+                />
+              );
+            })}
+            {!skillCatalog.length && !skillLoadError && <p className="py-3 text-[12px] text-faint">Loading available skills…</p>}
+          </div>
+        </div>
 
         {/* Not a <label>: the picker holds buttons and its own search field. */}
         <div>

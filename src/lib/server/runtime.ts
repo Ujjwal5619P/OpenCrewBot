@@ -98,6 +98,7 @@ async function signatureOf(bot: Bot): Promise<string> {
     tools: bot.tools,
     approval: bot.approval,
     approvalPermissions: bot.approvalPermissions ?? [],
+    skillIds: bot.skillIds ?? [],
     connections: bot.connections,
     connectionsVersion: bot.connections.length ? await connectionsVersion() : 0,
     mock: isMock(),
@@ -123,8 +124,8 @@ async function createBrowser(bot: Bot): Promise<MastraBrowser | undefined> {
 async function buildRuntime(bot: Bot): Promise<BotRuntime> {
   const holder = { bot };
   const memory = new Memory({ storage: state.storage, options: { lastMessages: 40 } });
-  const builtIn = buildTools(bot);
   const connectors = await buildConnectorTools(bot, `bot-${bot.id}-${Date.now()}`);
+  const builtIn = buildTools(bot, new Set(Object.keys(connectors.tools)));
   const tools = { ...connectors.tools, ...builtIn.tools };
   const capabilities = [...builtIn.capabilities, ...connectors.capabilities];
   const agent = new Agent({

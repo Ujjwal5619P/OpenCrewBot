@@ -56,6 +56,8 @@ export interface Bot {
   tools: BotTools;
   /** Connection ids this bot may use: `composio:<toolkit>` or `mcp:<serverId>`. */
   connections: string[];
+  /** Reusable skills enabled for this bot. Missing on legacy bot records. */
+  skillIds?: string[];
   approval: ApprovalMode;
   /** Exact registered tool IDs that Controlled Access may auto-approve, subject to sensitive-action checks. */
   approvalPermissions?: string[];
@@ -214,6 +216,28 @@ export interface McpServer {
 export interface ConnectionsState {
   composio: { enabled: boolean; apps: ComposioApp[]; error?: string };
   mcpServers: McpServer[];
+}
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  requiredTools: string[];
+}
+
+export type ComposioDiscoveryStatus = "connected" | "disconnected" | "unavailable" | "error";
+
+export interface ComposioDiscoveredTool {
+  toolSlug: string;
+  toolkit: string;
+  description: string;
+}
+
+export interface ComposioToolDiscovery {
+  slug: string;
+  status: ComposioDiscoveryStatus;
+  message?: string;
+  tools: ComposioDiscoveredTool[];
 }
 
 /** Something a bot can be given access to. */

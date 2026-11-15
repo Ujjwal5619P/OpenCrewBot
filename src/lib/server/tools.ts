@@ -13,6 +13,7 @@ import { keys } from "./config";
 import { mcpServerNames } from "./connectors";
 import { canAccessProjectMemory } from "./project-memory";
 import { toolsAllowedInCodeMode } from "./approval-core";
+import { reusableSkillTools } from "./skills/tools";
 
 export const CODE_MODE_TOOL = "execute_typescript";
 
@@ -150,7 +151,7 @@ export interface BotToolset {
   capabilities: string[];
 }
 
-export function buildTools(bot: Bot): BotToolset {
+export function buildTools(bot: Bot, connectorToolNames: ReadonlySet<string> = new Set()): BotToolset {
   const tools: ToolsInput = {};
   const instructions: string[] = [];
   const capabilities: string[] = [];
@@ -170,6 +171,12 @@ export function buildTools(bot: Bot): BotToolset {
   if (bot.tools.memory) {
     Object.assign(tools, memoryTools(bot.id));
   }
+  const availableToolNames = new Set([...connectorToolNames, ...Object.keys(tools)]);
+  if (bot.tools.codeMode) availableToolNames.add(CODE_MODE_TOOL);
+  Object.assign(tools, reusableSkillTools(bot.skillIds ?? [], availableToolNames));
+  capabilities.push(
+    "Discover reusable skills with skill_discover and load assigned, compatible guidance with skill_load. Skills do not add tools, connections, credentials, or permissions.",
+  );
   if (bot.tools.codeMode) {
     // The program runs in a QuickJS (WebAssembly) isolate with no filesystem or
     // network; its only reach is the tools passed here, bridged back to the host.
@@ -199,6 +206,7 @@ export function buildTools(bot: Bot): BotToolset {
 /** Which approval policy a tool falls under. Read and memory tools never ask;
  * acting in the browser does, unless the bot has Full access. */
 export function toolCategory(toolName: string): ToolCategory | null {
+  if (["skill_discover", "skill_load"].includes(toolName)) return "read";
   if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
   if (toolName === "project_memory_read") return "read";
   if (toolName === "project_memory_add") return "edit";

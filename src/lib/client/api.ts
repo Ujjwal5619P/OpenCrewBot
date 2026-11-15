@@ -6,6 +6,7 @@ import type {
   BotInput,
   ChatMessage,
   ComposioApp,
+  ComposioToolDiscovery,
   ConnectionsState,
   CollaborationMessage,
   ConversationId,
@@ -15,6 +16,7 @@ import type {
   ModelOption,
   Room,
   RoomInput,
+  SkillSummary,
 } from "@/lib/shared/types";
 
 async function call<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
@@ -42,6 +44,7 @@ export interface Bootstrap {
 
 export const api = {
   bootstrap: () => call<Bootstrap>("/api/bootstrap"),
+  skills: () => call<{ skills: SkillSummary[] }>("/api/skills"),
   models: (refresh = false) => call<{ models: ModelOption[] }>(`/api/models${refresh ? "?refresh=1" : ""}`),
   createBot: (input: BotInput) => call<{ bot: Bot }>("/api/bots", { method: "POST", json: input }),
   generateAgent: (description: string) =>
@@ -79,6 +82,10 @@ export const api = {
   read: (id: ConversationId) => call(`${conv(id)}/read`, { method: "POST" }),
   connections: () => call<ConnectionsState>("/api/connections"),
   searchApps: (q: string) => call<{ apps: ComposioApp[] }>(`/api/connections/composio/search?q=${encodeURIComponent(q)}`),
+  discoverComposioTools: (slug: string, query: string) =>
+    call<{ discovery: ComposioToolDiscovery }>(
+      `/api/connections/composio/tools?slug=${encodeURIComponent(slug)}&query=${encodeURIComponent(query)}`,
+    ),
   connectApp: (slug: string) => call<{ redirectUrl: string }>("/api/connections/composio/connect", { method: "POST", json: { slug } }),
   disconnectApp: (slug: string) => call("/api/connections/composio/disconnect", { method: "POST", json: { slug } }),
   connectionsChanged: () => call("/api/connections/changed", { method: "POST" }),

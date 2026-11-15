@@ -120,12 +120,17 @@ _Nothing happens until you choose. Staged example content._
 | Browser | A real cloud browser for pages that need clicks, forms or JavaScript. Watch it live from the chat and click in to take over | [Browserbase](https://www.browserbase.com) via Mastra `AgentBrowser` |
 | Ask me | Pause and ask you a question with a card in chat | Mastra `ask_user` |
 
+### Reusable skills
+
+The skill library contains Market Research, Competitor Analysis, Financial Modelling, Presentation Creation, Email Drafting, Code Review, Data Analysis, and Lead Generation. Assign skills to a bot in its editor; the bot can discover them and load their instructions on demand. A skill is guidance, not a tool or permission grant. The editor marks required tools that are missing, and server-side loading refuses an unassigned skill or one whose required tools are unavailable. Presentation Creation drafts slide content rather than creating a file; Email Drafting does not send mail. Any actual connected-app action still uses the bot's Composio tools and Module G approval policy.
+
 ### Connections
 
 Give bots access to Slack, GitHub, Gmail, Notion and the rest of your tools. Open **Connections** from the plug icon in the sidebar:
 
 - **Apps via [Composio](https://composio.dev).** Click **Connect**, sign in on the app's own page, and come back. Composio handles each app's sign-in and tokens, with 1,000+ apps available through search.
 - **Your own MCP servers.** Add any remote MCP server by URL and token. There's a preset for GitHub's official server (`https://api.githubcopilot.com/mcp/`, with a personal access token). **Add and test** connects straight away and reports how many tools it offers.
+- **GitHub, Gmail and Slack actions.** Search Composio's action catalog from each connected app row. Discovery only lists actions; it does not run them. If `COMPOSIO_API_KEY` is missing, these integrations are unavailable and are not simulated in mock mode.
 
 Then switch each connection on for the bots that should have it, in the bot's Details. Lookups run on their own; anything that changes something (sending a message, opening an issue) shows an approval card first, unless the bot has full access. Tokens stay on the server.
 
@@ -225,6 +230,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | --- | --- |
 | Bots | Name, role, instructions, color, model, tools and approval level per bot; pin, search, unread counts, live typing status |
 | Agent creation | Natural-language agent drafts with live or explicitly simulated generation, editable before creation |
+| Skills | Eight reusable, on-demand skills assigned per bot, with required-tool availability checks |
 | Models | Model sheet with suggested picks, search and the live Token Factory catalog; switch without a restart; tokens and cost on every reply |
 | Connections | Composio apps with one-click sign-in, your own MCP servers (GitHub preset), per-bot access, approval for actions |
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
@@ -255,6 +261,7 @@ Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do
 - `src/lib/server/chief-of-staff.ts` and `execution-service.ts`: validated planning, persistent task scheduling and execution recovery.
 - `src/lib/server/execution-core.ts`: dependency validation, retries and bounded parallel task execution.
 - `src/lib/server/tools.ts`: which tools a bot gets, their approval categories, and how each looks in chat.
+- `src/lib/server/skills/`: validated, reusable skill definitions and on-demand skill tools.
 - `src/lib/server/rooms.ts` and `jev.ts`: room routing, catch-up context and hand-offs.
 - `src/lib/server/collaboration.ts` and `collaboration-core.ts`: room membership, delegation limits, collaboration messages and verification.
 - `src/lib/server/memory-files.ts`: private/shared Markdown memory reads, writes, provenance and redaction.

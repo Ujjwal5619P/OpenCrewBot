@@ -95,7 +95,7 @@ export function AgentCreator({ onClose }: { onClose: () => void }) {
                 <p className="mt-1 text-[13px] leading-relaxed text-ink">{result.configuration.expectedOutputFormat}</p>
               </div>
               <p className="text-[12px] leading-relaxed text-faint">
-                Skills and output format are included as editable instructions; no new skills runtime or integrations are installed.
+                Suggested skills and output format are editable prompt guidance. You can also assign reusable library skills below; those do not install tools or integrations.
               </p>
               {result.unavailableTools.length > 0 && (
                 <p role="status" className="rounded-xl bg-warn-soft px-3 py-2 text-[12px] text-warn">

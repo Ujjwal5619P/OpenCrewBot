@@ -13,6 +13,7 @@ import { forgetConversation, resetBot, runTurn, runningBots, stopConversation } 
 import { messagePreview } from "@/lib/shared/preview";
 import { roomConversationId, runRoom } from "./rooms";
 import { recoverTaskExecutions } from "./execution-service";
+import { validateSkillIds } from "./skills/catalog";
 
 export { InputError };
 
@@ -132,6 +133,13 @@ function validateBot(input: Partial<BotInput>) {
       throw new InputError("Approval permissions must be unique tool IDs, with at most 100 entries.");
     }
   }
+  if (input.skillIds !== undefined) {
+    try {
+      validateSkillIds(input.skillIds);
+    } catch (error) {
+      throw new InputError(error instanceof Error ? error.message : "Choose skills from the available skill library.");
+    }
+  }
 }
 
 export async function createBot(input: BotInput): Promise<Bot> {
@@ -141,6 +149,7 @@ export async function createBot(input: BotInput): Promise<Bot> {
     id: randomUUID().slice(0, 8),
     name: input.name.trim(),
     connections: input.connections ?? [],
+    skillIds: input.skillIds ?? [],
     approvalPermissions: input.approvalPermissions ?? [],
     handle: await uniqueHandle(input.handle || input.name),
     createdAt: new Date().toISOString(),
@@ -162,6 +171,7 @@ export async function updateBot(id: string, patch: Partial<BotInput>): Promise<B
     createdAt: bot.createdAt,
     tools: { ...bot.tools, ...(patch.tools ?? {}) },
     approvalPermissions: patch.approvalPermissions ?? bot.approvalPermissions ?? [],
+    skillIds: patch.skillIds ?? bot.skillIds ?? [],
     handle: patch.handle !== undefined || patch.name !== undefined ? await uniqueHandle(patch.handle || patch.name || bot.handle, id) : bot.handle,
   };
   await store.saveBot(next);

@@ -13,6 +13,7 @@ import type {
   ExecutionTask,
   Room,
 } from "@/lib/shared/types";
+import { isSkillId } from "./skills/catalog";
 
 // Cached across hot reloads, together with the file it points at, so a
 // changed database path opens a fresh connection instead of reusing one
@@ -182,6 +183,7 @@ function normalizeBot(raw: Bot): Bot {
     approvalPermissions: Array.isArray(raw.approvalPermissions)
       ? raw.approvalPermissions.filter((toolName): toolName is string => typeof toolName === "string")
       : [],
+    skillIds: Array.isArray(raw.skillIds) ? raw.skillIds.filter(isSkillId) : [],
   };
 }
 
