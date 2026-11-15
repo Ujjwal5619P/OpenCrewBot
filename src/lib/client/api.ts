@@ -16,7 +16,10 @@ import type {
   ModelOption,
   Room,
   RoomInput,
+  ScheduledWorkflow,
+  ScheduledWorkflowRun,
   SkillSummary,
+  WorkflowRecurrence,
 } from "@/lib/shared/types";
 
 async function call<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
@@ -40,6 +43,16 @@ export interface Bootstrap {
   models: ModelOption[];
   /** botId → Browserbase live view URL for bots with an open browser. */
   liveViews: Record<string, string>;
+}
+
+export interface ScheduledWorkflowDraft {
+  name: string;
+  instruction: string;
+  recurrence: WorkflowRecurrence;
+  timeZone: string;
+  localTime?: string;
+  oneTimeLocal?: string;
+  weekdays?: number[];
 }
 
 export const api = {
@@ -70,6 +83,32 @@ export const api = {
   roomCollaboration: (id: string) =>
     call<{ executions: Execution[]; messages: CollaborationMessage[] }>(`/api/rooms/${id}/collaboration`),
   cancelExecution: (id: string) => call(`/api/executions/${id}/cancel`, { method: "POST" }),
+  scheduledWorkflows: (options?: { workflowId: string; limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (options) {
+      params.set("workflowId", options.workflowId);
+      if (options.limit !== undefined) params.set("limit", String(options.limit));
+      if (options.offset !== undefined) params.set("offset", String(options.offset));
+    }
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return call<{
+      workflows: ScheduledWorkflow[];
+      runs: ScheduledWorkflowRun[];
+      pagination: { workflowId: string; limit: number; offset: number; hasMore: boolean } | null;
+    }>(`/api/scheduled-workflows${query}`);
+  },
+  createScheduledWorkflow: (input: ScheduledWorkflowDraft) =>
+    call<{ workflow: ScheduledWorkflow }>("/api/scheduled-workflows", { method: "POST", json: input }),
+  updateScheduledWorkflow: (id: string, input: ScheduledWorkflowDraft) =>
+    call<{ workflow: ScheduledWorkflow }>(`/api/scheduled-workflows/${encodeURIComponent(id)}`, { method: "PATCH", json: input }),
+  deleteScheduledWorkflow: (id: string) =>
+    call<{ workflow: ScheduledWorkflow }>(`/api/scheduled-workflows/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  pauseScheduledWorkflow: (id: string) =>
+    call<{ workflow: ScheduledWorkflow }>(`/api/scheduled-workflows/${encodeURIComponent(id)}/pause`, { method: "POST" }),
+  resumeScheduledWorkflow: (id: string) =>
+    call<{ workflow: ScheduledWorkflow }>(`/api/scheduled-workflows/${encodeURIComponent(id)}/resume`, { method: "POST" }),
+  runScheduledWorkflow: (id: string) =>
+    call<{ execution: Execution }>(`/api/scheduled-workflows/${encodeURIComponent(id)}/run`, { method: "POST" }),
   messages: (id: ConversationId) => call<{ messages: ChatMessage[]; running: string[] }>(`${conv(id)}/messages`),
   send: (id: ConversationId, text: string) => call<{ message: ChatMessage }>(`${conv(id)}/messages`, { method: "POST", json: { text } }),
   approve: (id: ConversationId, botId: string, toolCallId: string, approve: boolean) =>

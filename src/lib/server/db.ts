@@ -12,6 +12,8 @@ import type {
   Execution,
   ExecutionTask,
   Room,
+  ScheduledWorkflow,
+  ScheduledWorkflowRun,
 } from "@/lib/shared/types";
 import { isSkillId } from "./skills/catalog";
 
@@ -21,7 +23,7 @@ import { isSkillId } from "./skills/catalog";
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 async function open(): Promise<Client> {
   const db = createClient({ url: APP_DB_URL });
@@ -140,6 +142,38 @@ async function open(): Promise<Client> {
         )`,
         "CREATE INDEX IF NOT EXISTS approvals_by_status_and_created ON approval_requests (status, created_at DESC)",
         { sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)", args: [new Date().toISOString()] },
+      ],
+      "write",
+    );
+  }
+  if (version < 6) {
+    await db.batch(
+      [
+        `CREATE TABLE IF NOT EXISTS scheduled_workflows (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          next_run_at TEXT,
+          updated_at TEXT NOT NULL,
+          data TEXT NOT NULL
+        )`,
+        "CREATE INDEX IF NOT EXISTS scheduled_workflows_by_next_run ON scheduled_workflows (status, next_run_at)",
+        `CREATE TABLE IF NOT EXISTS scheduled_workflow_runs (
+          id TEXT PRIMARY KEY,
+          workflow_id TEXT NOT NULL,
+          occurrence_key TEXT NOT NULL,
+          execution_id TEXT,
+          status TEXT NOT NULL,
+          scheduled_for TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          data TEXT NOT NULL,
+          UNIQUE (workflow_id, occurrence_key)
+        )`,
+        "CREATE INDEX IF NOT EXISTS scheduled_runs_by_workflow ON scheduled_workflow_runs (workflow_id, created_at DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS one_active_scheduled_run ON scheduled_workflow_runs (workflow_id) WHERE status IN ('claimed', 'running')",
+        { sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)", args: [new Date().toISOString()] },
       ],
       "write",
     );
@@ -569,7 +603,6 @@ export async function listExecutions(limit = 50): Promise<Execution[]> {
     }),
   );
 }
-
 export async function listRoomExecutions(roomId: string): Promise<Execution[]> {
   const client = await db();
   const rows = await client.execute({
@@ -711,6 +744,7 @@ export async function recoverInterruptedExecutions(): Promise<void> {
         task.completedAt = new Date().toISOString();
       }
     }
+
     execution.status = "failed";
     execution.error = execution.tasks.some((task) => task.status === "outcome_unknown")
       ? "Interrupted execution has task outcomes that require reconciliation."
@@ -719,3 +753,190 @@ export async function recoverInterruptedExecutions(): Promise<void> {
     await saveExecution(execution);
   }
 }
+
+// ── scheduled workflows ────────────────────────────────────────────────
+
+    function decodeScheduledWorkflow(data: string, status: string, nextRunAt: unknown, updatedAt: string): ScheduledWorkflow {
+      return {
+        ...(JSON.parse(data) as ScheduledWorkflow),
+        status: status as ScheduledWorkflow["status"],
+        nextRunAt: nextRunAt === null ? null : String(nextRunAt),
+        updatedAt,
+      };
+    }
+
+    function decodeScheduledWorkflowRun(
+      data: string,
+      status: string,
+      executionId: unknown,
+      scheduledFor: string,
+      startedAt: unknown,
+      completedAt: unknown,
+      error: unknown,
+    ): ScheduledWorkflowRun {
+      const run = JSON.parse(data) as ScheduledWorkflowRun;
+      return {
+        ...run,
+        status: status as ScheduledWorkflowRun["status"],
+        executionId: executionId === null ? undefined : String(executionId),
+        scheduledFor,
+        startedAt: startedAt === null ? undefined : String(startedAt),
+        completedAt: completedAt === null ? undefined : String(completedAt),
+        error: error === null ? undefined : String(error),
+      };
+    }
+
+    export async function saveScheduledWorkflow(workflow: ScheduledWorkflow): Promise<void> {
+      await (await db()).execute({
+        sql: `INSERT INTO scheduled_workflows (id, status, next_run_at, updated_at, data)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET status = excluded.status, next_run_at = excluded.next_run_at,
+              updated_at = excluded.updated_at, data = excluded.data`,
+        args: [workflow.id, workflow.status, workflow.nextRunAt, workflow.updatedAt, JSON.stringify(workflow)],
+      });
+    }
+
+    export async function getScheduledWorkflow(id: string): Promise<ScheduledWorkflow | null> {
+      const rows = await (await db()).execute({
+        sql: "SELECT data, status, next_run_at, updated_at FROM scheduled_workflows WHERE id = ?",
+        args: [id],
+      });
+      const row = rows.rows[0];
+      return row ? decodeScheduledWorkflow(String(row.data), String(row.status), row.next_run_at, String(row.updated_at)) : null;
+    }
+
+    export async function listScheduledWorkflows(includeDeleted = false): Promise<ScheduledWorkflow[]> {
+      const rows = await (await db()).execute({
+        sql: `SELECT data, status, next_run_at, updated_at FROM scheduled_workflows
+              ${includeDeleted ? "" : "WHERE status != 'deleted'"} ORDER BY COALESCE(next_run_at, updated_at), id`,
+      });
+      return rows.rows.map((row) =>
+        decodeScheduledWorkflow(String(row.data), String(row.status), row.next_run_at, String(row.updated_at)),
+      );
+    }
+
+    export async function claimScheduledWorkflowRun(
+      run: ScheduledWorkflowRun,
+    ): Promise<{ claimed: boolean; run: ScheduledWorkflowRun }> {
+      const result = await (await db()).execute({
+        sql: `INSERT OR IGNORE INTO scheduled_workflow_runs
+              (id, workflow_id, occurrence_key, execution_id, status, scheduled_for, started_at, completed_at, error, created_at, data)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          run.id,
+          run.workflowId,
+          run.occurrenceKey,
+          run.executionId ?? null,
+          run.status,
+          run.scheduledFor,
+          run.startedAt ?? null,
+          run.completedAt ?? null,
+          run.error ?? null,
+          run.createdAt,
+          JSON.stringify(run),
+        ],
+      });
+      if (result.rowsAffected === 1) return { claimed: true, run };
+
+      const existing = await getScheduledWorkflowRunForOccurrence(run.workflowId, run.occurrenceKey);
+      if (existing) return { claimed: false, run: existing };
+      const active = await getActiveScheduledWorkflowRun(run.workflowId);
+      if (active) return { claimed: false, run: active };
+      throw new Error("Could not claim the scheduled workflow occurrence.");
+    }
+
+    export async function saveScheduledWorkflowRun(run: ScheduledWorkflowRun): Promise<void> {
+      const result = await (await db()).execute({
+        sql: `UPDATE scheduled_workflow_runs SET execution_id = ?, status = ?, scheduled_for = ?, started_at = ?,
+              completed_at = ?, error = ?, data = ? WHERE id = ?`,
+        args: [
+          run.executionId ?? null,
+          run.status,
+          run.scheduledFor,
+          run.startedAt ?? null,
+          run.completedAt ?? null,
+          run.error ?? null,
+          JSON.stringify(run),
+          run.id,
+        ],
+      });
+      if (result.rowsAffected !== 1) throw new Error("The scheduled workflow run could not be updated.");
+    }
+
+    export async function getScheduledWorkflowRunForOccurrence(
+      workflowId: string,
+      occurrenceKey: string,
+    ): Promise<ScheduledWorkflowRun | null> {
+      const rows = await (await db()).execute({
+        sql: `SELECT data, status, execution_id, scheduled_for, started_at, completed_at, error
+              FROM scheduled_workflow_runs WHERE workflow_id = ? AND occurrence_key = ?`,
+        args: [workflowId, occurrenceKey],
+      });
+      const row = rows.rows[0];
+      return row
+        ? decodeScheduledWorkflowRun(
+            String(row.data),
+            String(row.status),
+            row.execution_id,
+            String(row.scheduled_for),
+            row.started_at,
+            row.completed_at,
+            row.error,
+          )
+        : null;
+    }
+
+    export async function getActiveScheduledWorkflowRun(workflowId: string): Promise<ScheduledWorkflowRun | null> {
+      const rows = await (await db()).execute({
+        sql: `SELECT data, status, execution_id, scheduled_for, started_at, completed_at, error
+              FROM scheduled_workflow_runs WHERE workflow_id = ? AND status IN ('claimed', 'running')
+              ORDER BY created_at LIMIT 1`,
+        args: [workflowId],
+      });
+      const row = rows.rows[0];
+      return row
+        ? decodeScheduledWorkflowRun(
+            String(row.data),
+            String(row.status),
+            row.execution_id,
+            String(row.scheduled_for),
+            row.started_at,
+            row.completed_at,
+            row.error,
+          )
+        : null;
+    }
+
+    export async function listScheduledWorkflowRuns(
+      workflowId?: string,
+      limit = 100,
+      activeOnly = false,
+      offset = 0,
+    ): Promise<ScheduledWorkflowRun[]> {
+      const where: string[] = [];
+      const args: (string | number)[] = [];
+      if (workflowId) {
+        where.push("workflow_id = ?");
+        args.push(workflowId);
+      }
+      if (activeOnly) where.push("status IN ('claimed', 'running')");
+      args.push(Math.max(1, Math.min(500, Math.floor(limit))));
+      args.push(Math.max(0, Math.floor(offset)));
+      const rows = await (await db()).execute({
+        sql: `SELECT data, status, execution_id, scheduled_for, started_at, completed_at, error
+              FROM scheduled_workflow_runs ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+              ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        args,
+      });
+      return rows.rows.map((row) =>
+        decodeScheduledWorkflowRun(
+          String(row.data),
+          String(row.status),
+          row.execution_id,
+          String(row.scheduled_for),
+          row.started_at,
+          row.completed_at,
+          row.error,
+        ),
+      );
+    }

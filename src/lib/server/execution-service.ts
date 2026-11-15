@@ -1,4 +1,4 @@
-import type { Bot, ChatMessage, Execution, ExecutionTask } from "@/lib/shared/types";
+import type { Bot, ChatMessage, Execution, ExecutionTask, ScheduledWorkflowPlan } from "@/lib/shared/types";
 import { randomUUID } from "node:crypto";
 import type { CollaborationMessage, CollaborationTaskSpec } from "@/lib/shared/types";
 import { isMock } from "./config";
@@ -368,11 +368,52 @@ function launchExecution(execution: Execution): void {
     });
 }
 
-export async function createExecution(instruction: unknown): Promise<Execution> {
-  const execution = await planExecution(instruction);
+export async function createExecutionFromPlan(
+  plan: ScheduledWorkflowPlan,
+  options: { id?: string; scheduleId?: string; createdAt?: string } = {},
+): Promise<Execution> {
+  const bots = await store.listBots();
+  let tasks: ExecutionTask[];
+  try {
+    tasks = createExecutionTasks(plan.tasks, bots);
+  } catch (error) {
+    throw new InputError(error instanceof Error ? error.message : "The saved workflow plan is no longer valid.");
+  }
+  const execution: Execution = {
+    id: options.id ?? randomUUID(),
+    instruction: plan.instruction,
+    summary: plan.summary,
+    plannerMode: plan.plannerMode,
+    plannerLabel: plan.plannerLabel,
+    status: "pending",
+    tasks,
+    scheduleId: options.scheduleId,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+  };
   await store.saveExecution(execution);
   launchExecution(execution);
   return execution;
+}
+
+export async function createExecution(instruction: unknown): Promise<Execution> {
+  const planned = await planExecution(instruction);
+  return createExecutionFromPlan(
+    {
+      instruction: planned.instruction,
+      summary: planned.summary,
+      plannerMode: planned.plannerMode,
+      plannerLabel: planned.plannerLabel,
+      tasks: planned.tasks.map(({ id, title, description, assignedBotId, requiredCapabilities, dependencies }) => ({
+        id,
+        title,
+        description,
+        assignedBotId,
+        requiredCapabilities,
+        dependencies,
+      })),
+    },
+    { id: planned.id, createdAt: planned.createdAt },
+  );
 }
 
 export async function createDelegatedExecution(input: {

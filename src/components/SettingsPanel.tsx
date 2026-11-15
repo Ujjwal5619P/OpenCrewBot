@@ -5,6 +5,7 @@ import { ArrowUpRight } from "lucide-react";
 import { useApp } from "./OpenCrewBotApp";
 import { Drawer } from "./ui";
 import { ApprovalCenter } from "./ApprovalCenter";
+import { ScheduledWorkflows } from "./ScheduledWorkflows";
 
 function KeyRow({ name, envVar, ok, what, href }: { name: string; envVar: string; ok: boolean; what: string; href: string }) {
   return (
@@ -71,6 +72,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         </ul>
       </section>
       <ApprovalCenter />
+      <ScheduledWorkflows />
       <section className="mt-7">
         <h3 className="text-[12.5px] font-medium text-mute">Data</h3>
         <p className="mt-1 text-[13px] text-mute">

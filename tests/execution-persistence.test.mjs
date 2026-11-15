@@ -19,7 +19,7 @@ test("stores execution history in the versioned SQLite database", () => {
       historyCount: 4,
       recoveredStatuses: ["outcome_unknown", "failed", "cancelled"],
       claimResults: [false, true],
-      schemaVersion: 5,
+      schemaVersion: 6,
       roomExecutionIds: ["history-check", "second-history-check"],
       childExecutionIds: ["second-history-check"],
       collaborationMessageTypes: ["question", "answer"],

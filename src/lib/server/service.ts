@@ -13,6 +13,7 @@ import { forgetConversation, resetBot, runTurn, runningBots, stopConversation } 
 import { messagePreview } from "@/lib/shared/preview";
 import { roomConversationId, runRoom } from "./rooms";
 import { recoverTaskExecutions } from "./execution-service";
+import { recoverScheduledWorkflowRuns, startScheduledWorkflowScheduler } from "./scheduled-workflows";
 import { validateSkillIds } from "./skills/catalog";
 
 export { InputError };
@@ -27,6 +28,8 @@ export function boot(): Promise<void> {
     await store.cancelPendingApprovalRequests("server-restart");
     await seed();
     await recoverTaskExecutions();
+    await recoverScheduledWorkflowRuns();
+    startScheduledWorkflowScheduler();
   })();
   return g.__opencrewbotBoot;
 }

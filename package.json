@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs tests/agent-creation.test.mjs tests/collaboration-core.test.mjs tests/collaboration-integration.test.mjs tests/project-memory.test.mjs tests/approval-policy.test.mjs tests/approval-persistence.test.mjs tests/approval-controller.test.mjs tests/approval-api.test.mjs tests/approval-resume.test.mjs tests/module-f.test.mjs"
+    "test": "node --experimental-strip-types --test tests/execution-core.test.mjs tests/execution-persistence.test.mjs tests/execution-request.test.mjs tests/agent-creation.test.mjs tests/collaboration-core.test.mjs tests/collaboration-integration.test.mjs tests/project-memory.test.mjs tests/approval-policy.test.mjs tests/approval-persistence.test.mjs tests/approval-controller.test.mjs tests/approval-api.test.mjs tests/approval-resume.test.mjs tests/module-f.test.mjs tests/scheduled-workflows.test.mjs"
   },
   "dependencies": {
     "@composio/core": "^0.23.0",

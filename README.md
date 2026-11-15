@@ -161,6 +161,14 @@ Executions and tasks are stored in the app's versioned SQLite schema. A server r
 
 Startup recovery assumes one active server process owns the SQLite database. Do not run multiple OpenCrewBot server processes against the same database: a process starting up cannot distinguish another live process's running execution from work interrupted by a restart.
 
+### Scheduled workflows
+
+Create and manage schedules in **Settings → Scheduled workflows**. A workflow is planned once and stores its task assignments and dependency graph; each scheduled or manual run creates a fresh execution through the existing execution service and records its schedule ID. This reuses the normal task engine, `runTurn()` path, and current approval settings. Changing the instruction replans the saved workflow. Mock-mode plans remain explicitly labelled simulated.
+
+One-time schedules use a local date/time and an IANA timezone. Daily and weekly schedules use wall-clock time in that timezone. During a daylight-saving fall-back overlap, the earlier matching instant is chosen; a wall-clock time that does not exist during a spring-forward gap is skipped for that date. Occurrences up to five minutes late run immediately. Older missed occurrences are recorded as skipped with no backfill. If the previous run is still active, the due occurrence is skipped rather than queued, so schedules never overlap. A paused recurring workflow resumes at its next future occurrence; an elapsed one-time schedule must be edited to a future time before it can resume.
+
+Schedule definitions, occurrence claims, execution links and run history persist in the versioned SQLite database. A unique occurrence key prevents duplicate scheduled launches, and a database constraint prevents overlapping active runs. A claimed occurrence with no execution record can safely be recovered using its preassigned execution ID; an execution already persisted is recovered by the existing execution engine, which does not replay interrupted tasks that may have produced external effects. The in-process scheduler checks for due work every 15 seconds. Like other startup recovery, it assumes exactly one active application server process owns the database; it is not a distributed scheduler or a substitute for an always-on server.
+
 ### Approval and permission controls
 
 Each bot can use **Ask First**, **Controlled Access**, or **Full Access**. Ask First preserves the existing read/edit behavior and pauses tools categorized as execution, connected-app/MCP, or other actions. MCP tools always require approval in Ask First and Controlled Access: their server-controlled names are not trusted as evidence that an action is read-only. Controlled Access only skips approval for exact configured tool IDs that are not classified as sensitive. Full Access skips individual approval prompts for tools actually registered to the bot, but does not add tools or grant arbitrary operating-system access. Code mode receives only the tools allowed by the same policy.
@@ -209,7 +217,7 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 
 ## Data and privacy
 
-Bots, rooms and the chat transcript are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Private bot memories are `data/workspaces/<botId>/MEMORY.md`; shared project memory is `data/PROJECT_MEMORY.md`, with its authorized bot IDs stored in the existing SQLite settings table. Nothing leaves your machine except calls to the services you configure:
+Bots, rooms, chat transcripts, executions, scheduled workflows and their run history are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Private bot memories are `data/workspaces/<botId>/MEMORY.md`; shared project memory is `data/PROJECT_MEMORY.md`, with its authorized bot IDs stored in the existing SQLite settings table. Nothing leaves your machine except calls to the services you configure:
 
 - **Nebius Token Factory** receives each bot's system prompt (including its private `MEMORY.md`), the conversation, and tool results. Shared project memory is included in tool results only after an authorized agent explicitly reads it.
 - **Chief of Staff planning** sends the instruction and available bot role descriptions/instructions to the selected Nebius model. Each assigned bot receives its task and completed dependency outputs.

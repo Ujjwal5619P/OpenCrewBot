@@ -313,6 +313,7 @@ export interface Execution {
   tasks: ExecutionTask[];
   output?: string;
   error?: string;
+  scheduleId?: string;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -325,6 +326,56 @@ export interface Execution {
     path: string[];
     patternKey?: string;
   };
+}
+
+export type WorkflowRecurrence = "once" | "daily" | "weekly";
+export type ScheduledWorkflowStatus = "active" | "paused" | "completed" | "deleted";
+export type ScheduledWorkflowRunStatus = "claimed" | "running" | "completed" | "failed" | "outcome_unknown" | "cancelled" | "skipped";
+
+export interface ScheduledWorkflowPlan {
+  instruction: string;
+  summary: string;
+  plannerMode: PlannerMode;
+  plannerLabel: string;
+  tasks: Array<{
+    id: string;
+    title: string;
+    description: string;
+    assignedBotId: string;
+    requiredCapabilities: TaskCapability[];
+    dependencies: string[];
+  }>;
+}
+
+export interface ScheduledWorkflow {
+  id: string;
+  name: string;
+  recurrence: WorkflowRecurrence;
+  timeZone: string;
+  localTime: string;
+  oneTimeLocal?: string;
+  weekdays: number[];
+  status: ScheduledWorkflowStatus;
+  nextRunAt: string | null;
+  lastRunAt?: string;
+  lastExecutionId?: string;
+  plan: ScheduledWorkflowPlan;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledWorkflowRun {
+  id: string;
+  workflowId: string;
+  occurrenceKey: string;
+  scheduledFor: string;
+  executionId?: string;
+  status: ScheduledWorkflowRunStatus;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  plan: ScheduledWorkflowPlan;
 }
 
 export type CollaborationMessageType =

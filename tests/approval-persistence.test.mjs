@@ -34,7 +34,7 @@ test("approval decisions are atomic, expire safely, and persist across server re
         expired: "expired",
         interrupted: "cancelled",
       },
-      schemaVersion: 5,
+      schemaVersion: 6,
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
