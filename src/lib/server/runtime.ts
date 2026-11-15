@@ -4,12 +4,13 @@
 // controller's events into the chat messages the UI renders.
 import { Agent } from "@mastra/core/agent";
 import { AgentController, type AgentControllerEvent, type Session } from "@mastra/core/agent-controller";
+import { RequestContext } from "@mastra/core/request-context";
 import type { MastraBrowser } from "@mastra/core/browser";
 import { LibSQLStore } from "@mastra/libsql";
 import { Memory } from "@mastra/memory";
 import { randomUUID } from "node:crypto";
-import type { ApprovalRequest, Bot, ChatMessage, ConversationId, Part, RouteNote } from "@/lib/shared/types";
-import { MASTRA_DB_URL, OWNER_ID, isMock } from "./config";
+import type { ApprovalRequest, Bot, ChatMessage, ConversationId, ModelTaskType, Part, RouteNote } from "@/lib/shared/types";
+import { MASTRA_DB_URL, OWNER_ID } from "./config";
 import {
   cancelPendingApprovalRequests,
   cancelApprovalRequest,
@@ -33,7 +34,15 @@ import {
 } from "./approval-core";
 import { publish } from "./bus";
 import { InputError } from "./errors";
-import { costUsd, findModel } from "./models";
+import {
+  costUsd,
+  findModel,
+  isModelResolution,
+  mastraModelForResolution,
+  MODEL_REQUEST_CONTEXT_KEY,
+  resolveModelForBot,
+  type ModelResolution,
+} from "./models";
 import { createMockModel } from "./mock-model";
 import { announceLiveView, createSession, releaseSession } from "./browserbase";
 import { buildConnectorTools, connectionsVersion } from "./connectors";
@@ -101,7 +110,6 @@ async function signatureOf(bot: Bot): Promise<string> {
     skillIds: bot.skillIds ?? [],
     connections: bot.connections,
     connectionsVersion: bot.connections.length ? await connectionsVersion() : 0,
-    mock: isMock(),
   });
 }
 
@@ -110,14 +118,14 @@ async function signatureOf(bot: Bot): Promise<string> {
 async function createBrowser(bot: Bot): Promise<MastraBrowser | undefined> {
   if (!bot.tools.browser) return undefined;
   const { AgentBrowser } = await import("@mastra/agent-browser");
-  const model = isMock() ? undefined : await findModel(bot.model);
+  const model = await findModel(bot.model, bot.modelProvider ?? "nebius");
   return new AgentBrowser({
     cdpUrl: () => createSession(bot.id),
     scope: "shared",
     onLaunch: () => announceLiveView(bot.id),
     onClose: () => releaseSession(bot.id),
     // A screenshot comes back as an image, which text-only models can't read.
-    excludeTools: model?.vision ? [] : ["browser_screenshot"],
+    excludeTools: model?.available && model.vision ? [] : ["browser_screenshot"],
   }) as unknown as MastraBrowser;
 }
 
@@ -132,7 +140,12 @@ async function buildRuntime(bot: Bot): Promise<BotRuntime> {
     id: `bot-${bot.id}`,
     name: bot.name,
     instructions: () => systemPrompt(holder.bot, capabilities, builtIn.instructions),
-    model: isMock() ? createMockModel(bot.name) : () => `nebius/${holder.bot.model}`,
+    model: ({ requestContext }) => {
+      const value: unknown = requestContext?.get(MODEL_REQUEST_CONTEXT_KEY);
+      if (!isModelResolution(value)) throw new Error("No valid model was resolved for this turn.");
+      const resolution = value;
+      return resolution.simulated ? createMockModel(holder.bot.name) : mastraModelForResolution(resolution);
+    },
     tools,
     memory,
   });
@@ -248,15 +261,16 @@ class TurnFolder {
   private textPart = new Map<string, number>();
   private reasoningPart = new Map<string, number>();
   private toolPart = new Map<string, number>();
-  private input = 0;
-  private output = 0;
+  private input: number | null = null;
+  private output: number | null = null;
+  private resolution?: ModelResolution;
   private resolveDone!: (m: ChatMessage) => void;
   readonly done = new Promise<ChatMessage>((r) => (this.resolveDone = r));
   finished = false;
 
   constructor(
     conversationId: ConversationId,
-    bot: Bot,
+    private readonly bot: Bot,
     route?: RouteNote,
     private readonly onProgress?: (message: ChatMessage) => void,
   ) {
@@ -268,9 +282,15 @@ class TurnFolder {
       createdAt: new Date().toISOString(),
       status: "streaming",
       parts: [],
-      model: isMock() ? "mock" : bot.model,
+      model: bot.model,
       route,
     };
+  }
+
+  setModelResolution(resolution: ModelResolution) {
+    this.resolution = resolution;
+    this.message.model = resolution.simulated ? "mock" : resolution.model;
+    this.emit();
   }
 
   private emit(persist = false) {
@@ -386,8 +406,12 @@ class TurnFolder {
       }
       case "usage_update": {
         const u = event.usage as { promptTokens?: number; completionTokens?: number };
-        this.input += u.promptTokens ?? 0;
-        this.output += u.completionTokens ?? 0;
+        if (typeof u.promptTokens === "number" && Number.isFinite(u.promptTokens)) {
+          this.input = (this.input ?? 0) + u.promptTokens;
+        }
+        if (typeof u.completionTokens === "number" && Number.isFinite(u.completionTokens)) {
+          this.output = (this.output ?? 0) + u.completionTokens;
+        }
         break;
       }
       case "error": {
@@ -459,16 +483,24 @@ class TurnFolder {
         p.status = status === "stopped" ? "denied" : "error";
       }
     }
-    if (this.message.model !== "mock") {
-      const model = await findModel(this.message.model ?? "");
-      this.message.usage = { input: this.input, output: this.output, costUsd: costUsd(model, this.input, this.output) };
-    } else {
-      this.message.usage = { input: this.input, output: this.output, costUsd: null };
-    }
+    this.message.usage = {
+      input: this.input,
+      output: this.output,
+      costUsd: this.resolution?.simulated ? null : costUsd(this.resolution?.option, this.input, this.output),
+      provider: this.resolution?.providerId ?? this.botProvider,
+      model: this.resolution?.model ?? this.message.model ?? "unknown",
+      requestedAt: this.message.createdAt,
+      simulated: this.resolution?.simulated ?? false,
+      ...(this.resolution?.fallbackFrom ? { fallbackFrom: this.resolution.fallbackFrom } : {}),
+    };
     this.onProgress?.(this.message);
     await saveMessage(this.message);
     publish({ type: "message", message: this.message });
     this.resolveDone(this.message);
+  }
+
+  private get botProvider(): "nebius" | "ollama" {
+    return this.bot.modelProvider ?? "nebius";
   }
 }
 
@@ -480,6 +512,7 @@ export interface TurnRequest {
   /** What the bot receives: the person's words, or a room's catch-up text. */
   content: string;
   route?: RouteNote;
+  modelTask?: ModelTaskType;
   onProgress?: (message: ChatMessage) => void;
 }
 
@@ -503,7 +536,7 @@ export function runTurn(request: TurnRequest): Promise<ChatMessage | null> {
   return next;
 }
 
-async function executeTurn({ bot, conversationId, content, route, onProgress }: TurnRequest): Promise<ChatMessage> {
+async function executeTurn({ bot, conversationId, content, route, modelTask = "general", onProgress }: TurnRequest): Promise<ChatMessage> {
   const latest = (await getBot(bot.id)) ?? bot;
   const k = key(conversationId, latest.id);
   const folder = new TurnFolder(conversationId, latest, route, onProgress);
@@ -515,6 +548,10 @@ async function executeTurn({ bot, conversationId, content, route, onProgress }: 
   let unsubscribe: (() => void) | undefined;
   try {
     const session = await sessionFor(latest, conversationId);
+    const resolution = await resolveModelForBot(latest, modelTask);
+    folder.setModelResolution(resolution);
+    const requestContext = new RequestContext();
+    requestContext.set(MODEL_REQUEST_CONTEXT_KEY, resolution);
     let eventQueue = Promise.resolve();
     unsubscribe = session.subscribe((event) => {
       eventQueue = eventQueue.then(() => folder.handle(event)).catch(async (error) => {
@@ -532,7 +569,7 @@ async function executeTurn({ bot, conversationId, content, route, onProgress }: 
         }
       });
     });
-    await session.sendMessage({ content });
+    await session.sendMessage({ content, requestContext });
     await eventQueue;
     // The run settled. If no terminal event reached us and nothing waits on the
     // person, close the turn here so it never hangs as "streaming".

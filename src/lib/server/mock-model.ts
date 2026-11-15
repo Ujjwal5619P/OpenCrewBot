@@ -1,4 +1,4 @@
-// A scripted stand-in for a real model, used when NEBIUS_API_KEY is missing.
+// A scripted stand-in used when no configured model provider is available.
 // It streams a short reply and exercises the same paths a real model does:
 // "remember …" calls a memory tool, "search …" calls web search, "ask me …"
 // asks a question card, and "open <url>" drives the browser (which asks first).
@@ -43,8 +43,6 @@ function textParts(text: string): Part[] {
   ];
 }
 
-const usage = { inputTokens: 120, outputTokens: 40, totalTokens: 160 };
-
 export function createMockModel(botName: string) {
   return new MastraLanguageModelV2Mock({
     provider: "mock",
@@ -66,7 +64,7 @@ export function createMockModel(botName: string) {
           stream: streamOf([
             ...start,
             ...textParts(`Done. The tool returned: ${result}\n\n*(Mock model. The tool really ran.)*`),
-            { type: "finish", finishReason: "stop", usage },
+            { type: "finish", finishReason: "stop" },
           ]),
         };
       }
@@ -75,7 +73,7 @@ export function createMockModel(botName: string) {
         stream: streamOf([
           ...start,
           { type: "tool-call", toolCallId: `mock-${Date.now()}`, toolName, input: JSON.stringify(input) },
-          { type: "finish", finishReason: "tool-calls", usage },
+          { type: "finish", finishReason: "tool-calls" },
         ]),
       });
 
@@ -101,10 +99,10 @@ export function createMockModel(botName: string) {
       if (search && tools.has("web_search")) return toolCall("web_search", { query: search[1], maxResults: 3 });
 
       const reply =
-        `Hi, I'm **${botName}**, running on the *mock model* because no \`NEBIUS_API_KEY\` is set yet.\n\n` +
+        `Hi, I'm **${botName}**, running on the *mock model* because no configured model provider is available.\n\n` +
         `You said: "${said.slice(0, 200)}"\n\n` +
         "Try `remember that I like short answers`, `search for Nebius Token Factory`, or `ask me something` to see tools run.";
-      return { stream: streamOf([...start, ...textParts(reply), { type: "finish", finishReason: "stop", usage }]) };
+      return { stream: streamOf([...start, ...textParts(reply), { type: "finish", finishReason: "stop" }]) };
     }) as never,
   });
 }

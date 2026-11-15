@@ -1,7 +1,6 @@
-import type { Bot, ChatMessage, Execution, ExecutionTask, ScheduledWorkflowPlan } from "@/lib/shared/types";
+import type { Bot, ChatMessage, Execution, ExecutionTask, ModelTaskType, ScheduledWorkflowPlan } from "@/lib/shared/types";
 import { randomUUID } from "node:crypto";
 import type { CollaborationMessage, CollaborationTaskSpec } from "@/lib/shared/types";
-import { isMock } from "./config";
 import { verificationVerdict } from "./collaboration-core";
 import { InputError } from "./errors";
 import * as store from "./db";
@@ -17,6 +16,7 @@ import {
 } from "./execution-core";
 import { runTurn, stopConversation } from "./runtime";
 import { toolCategory } from "./tools";
+import { listModelCatalog } from "./models";
 
 const TASK_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_RETRIES = 2;
@@ -53,6 +53,15 @@ function messageOutput(message: ChatMessage): string {
     .map((part) => (part.kind === "text" ? part.text : ""))
     .join("\n")
     .trim();
+}
+
+function modelTaskFor(task: ExecutionTask): ModelTaskType {
+  const capabilities = new Set(task.requiredCapabilities);
+  if (capabilities.has("codeMode") || /\b(code|implement|program|script)\b/i.test(task.title + " " + task.description)) return "coding";
+  if (capabilities.has("analysis") || /\b(data|analy[sz]e|metrics|statistics)\b/i.test(task.title + " " + task.description)) return "data_analysis";
+  if (capabilities.has("research") || capabilities.has("webSearch")) return "research";
+  if (capabilities.has("planning")) return "planning";
+  return "general";
 }
 
 async function runAssignedTask(
@@ -189,7 +198,7 @@ async function runAssignedTask(
   try {
     if (signal.aborted || timedOut) throw new Error("Execution cancelled.");
     runTurnStarted = true;
-    const turn = runTurn({ bot, conversationId, content, onProgress });
+    const turn = runTurn({ bot, conversationId, content, modelTask: modelTaskFor(task), onProgress });
     const reply = await Promise.race([turn, interrupted, timeoutPromise]);
     if (!reply) throw new Error("The task was stopped before it started.");
     const toolOutcome = classifyToolOutcome(reply);
@@ -463,13 +472,15 @@ export async function createDelegatedExecution(input: {
       verificationOfTaskId: spec.verificationOfTaskId,
     };
   }
+  const catalog = await listModelCatalog();
+  const simulated = !catalog.providers.some((provider) => provider.available);
   const createdAt = new Date().toISOString();
   const execution: Execution = {
     id: randomUUID(),
     instruction: input.instruction,
     summary: input.summary,
-    plannerMode: isMock() ? "simulated" : "ai",
-    plannerLabel: isMock() ? "Agent delegation (simulated mode)" : "Agent delegation",
+    plannerMode: simulated ? "simulated" : "ai",
+    plannerLabel: simulated ? "Agent delegation (simulated mode)" : "Agent delegation",
     status: "pending",
     tasks,
     createdAt,

@@ -2,8 +2,8 @@ import { Agent } from "@mastra/core/agent";
 import type { AgentConfigurationResult, BotTools } from "@/lib/shared/types";
 import { AgentConfigurationError, AgentConfigurationSchema, agentConfigurationToBotInput, simulatedAgentConfiguration, validateAgentConfiguration } from "./agent-config";
 import { InputError } from "./errors";
-import { isMock, keys } from "./config";
-import { DEFAULT_MODEL, listModels } from "./models";
+import { keys } from "./config";
+import { DEFAULT_MODEL, listModelCatalog, mastraModelFor } from "./models";
 
 export class AgentGenerationError extends Error {}
 
@@ -17,13 +17,13 @@ function availableTools(): BotTools {
   };
 }
 
-function generationPrompt(description: string, models: string[], tools: BotTools): string {
+function generationPrompt(description: string, models: { providerId: string; model: string }[], tools: BotTools): string {
   return [
     "Generate a valid OpenCrewBot agent configuration for the user's description.",
     "Use only the exact existing tool fields webSearch, memory, codeMode, browser, and askUser. Do not invent tools, integrations, connections, or executable skills.",
     "Skills are short instruction hints only; no new skills runtime exists. Keep memory.enabled equal to tools.memory.",
     'Set approval to "ask" and both approvalPermissions fields to "ask". Never grant Full Access.',
-    "Choose a model only from the provided model ids, and use a tool-capable model.",
+    "Choose a modelProvider and model only from the provided provider/model pairs, and use a tool-capable model.",
     `Available models: ${JSON.stringify(models)}`,
     `Available tools (true means configured on this server): ${JSON.stringify(tools)}`,
     "If a requested tool is unavailable, leave it disabled. Do not claim unavailable tools in the instructions.",
@@ -37,27 +37,34 @@ export async function generateAgentConfiguration(rawDescription: unknown): Promi
   const description = rawDescription.trim();
   if (description.length > 20_000) throw new InputError("Agent descriptions are limited to 20,000 characters.");
 
-  const models = (await listModels()).filter((model) => model.tools);
+  const catalog = await listModelCatalog();
+  const availableModels = catalog.models.filter((model) => model.available && model.tools);
+  const models = availableModels.length
+    ? availableModels
+    : catalog.models.filter((model) => model.providerId === "nebius" && model.tools);
   if (!models.length) throw new AgentGenerationError("No tool-capable models are available.");
   const tools = availableTools();
-  const mode = isMock() ? "simulated" : "live";
-  const generationModel = models.find((model) => model.id === DEFAULT_MODEL)?.id ?? models[0].id;
+  const mode = availableModels.length ? "live" : "simulated";
+  const generationModel = models.find((model) => model.providerId === "nebius" && model.id === DEFAULT_MODEL) ?? models[0];
   let rawConfiguration: unknown;
 
   if (mode === "simulated") {
-    rawConfiguration = simulatedAgentConfiguration(description, generationModel);
+    rawConfiguration = simulatedAgentConfiguration(description, generationModel.id, generationModel.providerId);
   } else {
     const designer = new Agent({
       id: "opencrewbot-agent-designer",
       name: "OpenCrewBot Agent Designer",
       instructions: "You design safe, useful agent configurations using only the supplied model and tool options.",
-      model: `nebius/${generationModel}`,
+      model: mastraModelFor({ providerId: generationModel.providerId, model: generationModel.id }),
     });
     try {
-      const result = await designer.generate(generationPrompt(description, models.map((model) => model.id), tools), {
+      const result = await designer.generate(
+        generationPrompt(description, models.map((model) => ({ providerId: model.providerId, model: model.id })), tools),
+        {
         maxSteps: 1,
         structuredOutput: { schema: AgentConfigurationSchema },
-      });
+        },
+      );
       rawConfiguration = result.object;
     } catch (error) {
       console.error("[opencrewbot] AI agent configuration generation failed.", error);
@@ -73,7 +80,9 @@ export async function generateAgentConfiguration(rawDescription: unknown): Promi
       configuration: validated.configuration,
       botInput,
       mode,
-      label: mode === "live" ? `AI-generated with ${generationModel}` : "Simulated configuration (mock mode; no AI inference)",
+      label: mode === "live"
+        ? `AI-generated with ${generationModel.providerId} · ${generationModel.id}`
+        : "Simulated configuration (no available model provider; no AI inference)",
       unavailableTools: validated.unavailableTools,
     };
   } catch (error) {

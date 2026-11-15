@@ -2,7 +2,17 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Bot, BotInput, ChatMessage, ConversationId, ConversationSummary, Room, RoomInput } from "@/lib/shared/types";
+import type {
+  Bot,
+  BotInput,
+  ChatMessage,
+  ConversationId,
+  ConversationSummary,
+  ModelSelection,
+  ModelTaskType,
+  Room,
+  RoomInput,
+} from "@/lib/shared/types";
 import { DATA_DIR } from "./config";
 import { InputError } from "./errors";
 import * as store from "./db";
@@ -119,6 +129,17 @@ async function uniqueHandle(wanted: string, exceptId?: string): Promise<string> 
 }
 
 function validateBot(input: Partial<BotInput>) {
+  const containsProviderSecret = (value: unknown): boolean => {
+    if (!value || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some(containsProviderSecret);
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) =>
+      /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|credentials?|headers|base[_-]?url|endpoint)$/i.test(key) ||
+      containsProviderSecret(child),
+    );
+  };
+  if (containsProviderSecret(input)) {
+    throw new InputError("Model-provider credentials and endpoints must be configured on the server, not on a bot.");
+  }
   if (input.name !== undefined && !input.name.trim()) throw new InputError("A bot needs a name.");
   if (input.name && input.name.length > 40) throw new InputError("Keep the name under 40 characters.");
   if (input.instructions && input.instructions.length > 8000) throw new InputError("Instructions are limited to 8,000 characters.");
@@ -143,6 +164,36 @@ function validateBot(input: Partial<BotInput>) {
       throw new InputError(error instanceof Error ? error.message : "Choose skills from the available skill library.");
     }
   }
+  if (input.modelProvider !== undefined && input.modelProvider !== "nebius" && input.modelProvider !== "ollama") {
+    throw new InputError("Choose a supported model provider.");
+  }
+  if (input.model !== undefined && (typeof input.model !== "string" || !/^[\w./:-]{1,200}$/.test(input.model))) {
+    throw new InputError("Choose a valid model ID.");
+  }
+  const validateSelection = (selection: unknown): selection is ModelSelection => {
+    if (!selection || typeof selection !== "object" || Array.isArray(selection)) return false;
+    const record = selection as Record<string, unknown>;
+    return Object.keys(record).every((key) => key === "providerId" || key === "model")
+      && (record.providerId === "nebius" || record.providerId === "ollama")
+      && typeof record.model === "string"
+      && /^[\w./:-]{1,200}$/.test(record.model);
+  };
+  if (input.fallbackModel !== undefined && input.fallbackModel !== null && !validateSelection(input.fallbackModel)) {
+    throw new InputError("Choose a valid fallback provider and model.");
+  }
+  if (input.modelRouting !== undefined) {
+    const taskTypes: ModelTaskType[] = ["general", "research", "coding", "data_analysis", "planning"];
+    if (
+      !input.modelRouting ||
+      typeof input.modelRouting !== "object" ||
+      Array.isArray(input.modelRouting) ||
+      Object.entries(input.modelRouting).some(([taskType, selection]) =>
+        !taskTypes.includes(taskType as ModelTaskType) || !validateSelection(selection),
+      )
+    ) {
+      throw new InputError("Choose valid models for supported task types.");
+    }
+  }
 }
 
 export async function createBot(input: BotInput): Promise<Bot> {
@@ -151,6 +202,8 @@ export async function createBot(input: BotInput): Promise<Bot> {
     ...input,
     id: randomUUID().slice(0, 8),
     name: input.name.trim(),
+    modelProvider: input.modelProvider ?? "nebius",
+    fallbackModel: input.fallbackModel ?? undefined,
     connections: input.connections ?? [],
     skillIds: input.skillIds ?? [],
     approvalPermissions: input.approvalPermissions ?? [],
@@ -172,6 +225,7 @@ export async function updateBot(id: string, patch: Partial<BotInput>): Promise<B
     ...patch,
     id: bot.id,
     createdAt: bot.createdAt,
+    fallbackModel: patch.fallbackModel === null ? undefined : patch.fallbackModel ?? bot.fallbackModel,
     tools: { ...bot.tools, ...(patch.tools ?? {}) },
     approvalPermissions: patch.approvalPermissions ?? bot.approvalPermissions ?? [],
     skillIds: patch.skillIds ?? bot.skillIds ?? [],

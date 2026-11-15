@@ -3,7 +3,7 @@
 import { ExternalLink, Pencil, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, CollaborationMessage, Execution, Room } from "@/lib/shared/types";
+import type { Bot, CollaborationMessage, Execution, ModelSelection, Room } from "@/lib/shared/types";
 import { BotForm, MemoryEditor } from "./BotForms";
 import { SharedMemoryEditor } from "./SharedMemoryEditor";
 import { ModelPicker } from "./ModelPicker";
@@ -148,11 +148,12 @@ function BotDetails({ bot }: { bot: Bot }) {
   const { state, toast } = useApp();
   const [editing, setEditing] = useState(false);
 
-  const switchModel = async (id: string) => {
-    if (id === bot.model) return;
+  const selection = { providerId: bot.modelProvider ?? "nebius", model: bot.model };
+  const switchModel = async (next: ModelSelection) => {
+    if (next.model === selection.model && next.providerId === selection.providerId) return;
     try {
-      await api.updateBot(bot.id, { model: id });
-      toast(`${bot.name} now uses ${state.models.find((m) => m.id === id)?.label ?? id}, from its next reply.`);
+      await api.updateBot(bot.id, { model: next.model, modelProvider: next.providerId });
+      toast(`${bot.name} now uses ${state.models.find((m) => m.providerId === next.providerId && m.id === next.model)?.label ?? next.model}, from its next reply.`);
     } catch (error) {
       toast(error instanceof Error ? error.message : "Couldn't switch the model.");
     }
@@ -181,8 +182,16 @@ function BotDetails({ bot }: { bot: Bot }) {
       </Card>
       <section>
         <h3 className="mb-1.5 px-1 text-[12.5px] font-medium text-faint">Default model</h3>
-        <ModelPicker value={bot.model} onChange={switchModel} />
-        {state.status?.mock && <p className="mt-1.5 px-1 text-[12px] text-faint">Mock mode: replies use a scripted model until NEBIUS_API_KEY is set.</p>}
+        <ModelPicker value={selection} onChange={switchModel} />
+        {!state.models.some((model) => model.providerId === selection.providerId && model.id === selection.model && model.available) && (
+          <p className="mt-1.5 px-1 text-[12px] text-faint">
+            {bot.fallbackModel
+              ? "Primary model is unavailable; the configured fallback is selected before the turn starts."
+              : selection.providerId === "nebius" && !state.status?.keys.nebius
+                ? "Mock mode: replies use scripted responses until NEBIUS_API_KEY is set."
+                : "This model is unavailable and will not be selected for a real request."}
+          </p>
+        )}
       </section>
       <Card title="Tools">
         {tools.length ? (

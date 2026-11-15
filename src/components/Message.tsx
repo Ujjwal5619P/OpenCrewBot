@@ -329,9 +329,20 @@ export function MessageItem({ message, bot, showAuthor }: { message: ChatMessage
       </div>
       <div className="mt-1 flex h-4 flex-wrap gap-x-2 pl-2 text-[11.5px] text-faint opacity-0 transition-opacity group-hover:opacity-100">
         <span>{timeLabel(message.createdAt)}</span>
-        {message.model && !streaming && <span>{message.model === "mock" ? "mock model" : message.model.split("/").pop()}</span>}
-        {message.usage && (message.usage.input > 0 || message.usage.output > 0) && (
-          <span title={`${message.usage.input} in · ${message.usage.output} out`}>{formatTokens(message.usage.input + message.usage.output)} tokens</span>
+        {message.usage && !streaming && (
+          <span title={`${message.usage.provider} · ${message.usage.model}${message.usage.simulated ? " · simulated" : ""}`}>
+            {message.usage.simulated ? "simulated" : message.usage.provider} · {message.usage.model.split("/").pop()}
+          </span>
+        )}
+        {message.usage?.fallbackFrom && (
+          <span title={`Fallback selected before the turn: ${message.usage.fallbackFrom.providerId} · ${message.usage.fallbackFrom.model}`}>
+            fallback used
+          </span>
+        )}
+        {message.usage && (message.usage.input !== null || message.usage.output !== null) && (
+          <span title={`${message.usage.input ?? "unknown"} in · ${message.usage.output ?? "unknown"} out`}>
+            {formatTokens((message.usage.input ?? 0) + (message.usage.output ?? 0))} tokens
+          </span>
         )}
         {cost && <span>{cost}</span>}
       </div>

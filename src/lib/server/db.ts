@@ -14,6 +14,8 @@ import type {
   Room,
   ScheduledWorkflow,
   ScheduledWorkflowRun,
+  ModelProviderId,
+  ModelUsageSummary,
 } from "@/lib/shared/types";
 import { isSkillId } from "./skills/catalog";
 
@@ -23,7 +25,7 @@ import { isSkillId } from "./skills/catalog";
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 async function open(): Promise<Client> {
   const db = createClient({ url: APP_DB_URL });
@@ -178,6 +180,28 @@ async function open(): Promise<Client> {
       "write",
     );
   }
+  if (version < 7) {
+    await db.batch(
+      [
+        `CREATE TABLE IF NOT EXISTS model_usage (
+          message_id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          bot_id TEXT,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          input_tokens INTEGER,
+          output_tokens INTEGER,
+          cost_usd REAL,
+          requested_at TEXT NOT NULL,
+          simulated INTEGER NOT NULL DEFAULT 0,
+          fallback INTEGER NOT NULL DEFAULT 0
+        )`,
+        "CREATE INDEX IF NOT EXISTS model_usage_by_requested_at ON model_usage (requested_at DESC)",
+        { sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)", args: [new Date().toISOString()] },
+      ],
+      "write",
+    );
+  }
   return db;
 }
 
@@ -212,6 +236,7 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
 function normalizeBot(raw: Bot): Bot {
   return {
     ...raw,
+    modelProvider: raw.modelProvider === "ollama" ? "ollama" : "nebius",
     connections: raw.connections ?? [],
     approval: raw.approval === "full" || raw.approval === "controlled" ? raw.approval : "ask",
     approvalPermissions: Array.isArray(raw.approvalPermissions)
@@ -272,11 +297,70 @@ export async function deleteRoomRow(id: string): Promise<void> {
 // ── messages ────────────────────────────────────────────────────────────
 
 export async function saveMessage(message: ChatMessage): Promise<void> {
-  await (await db()).execute({
+  const storedMessage = normalizeMessage(message);
+  const client = await db();
+  const messageStatement = {
     sql: `INSERT INTO messages (id, conversation_id, created_at, data) VALUES (?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
-    args: [message.id, message.conversationId, message.createdAt, JSON.stringify(message)],
-  });
+    args: [storedMessage.id, storedMessage.conversationId, storedMessage.createdAt, JSON.stringify(storedMessage)],
+  };
+  if (!storedMessage.usage) {
+    await client.execute(messageStatement);
+    return;
+  }
+  await client.batch(
+    [
+      messageStatement,
+      {
+      sql: `INSERT INTO model_usage
+        (message_id, conversation_id, bot_id, provider, model, input_tokens, output_tokens, cost_usd, requested_at, simulated, fallback)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          bot_id = excluded.bot_id,
+          provider = excluded.provider,
+          model = excluded.model,
+          input_tokens = excluded.input_tokens,
+          output_tokens = excluded.output_tokens,
+          cost_usd = excluded.cost_usd,
+          requested_at = excluded.requested_at,
+          simulated = excluded.simulated,
+          fallback = excluded.fallback`,
+      args: [
+        storedMessage.id,
+        storedMessage.conversationId,
+        storedMessage.botId ?? null,
+        storedMessage.usage.provider,
+        storedMessage.usage.model,
+        storedMessage.usage.input,
+        storedMessage.usage.output,
+        storedMessage.usage.costUsd,
+        storedMessage.usage.requestedAt,
+        Number(storedMessage.usage.simulated),
+        Number(Boolean(storedMessage.usage.fallbackFrom)),
+      ],
+      },
+    ],
+    "write",
+  );
+}
+
+function normalizeMessage(raw: ChatMessage): ChatMessage {
+  const usage = raw.usage as (ChatMessage["usage"] & { provider?: unknown; model?: unknown; requestedAt?: unknown; simulated?: unknown }) | undefined;
+  if (!usage || (usage.provider && usage.model && usage.requestedAt !== undefined && usage.simulated !== undefined)) return raw;
+  const simulated = raw.model === "mock";
+  return {
+    ...raw,
+    usage: {
+      input: simulated ? null : typeof usage.input === "number" ? usage.input : null,
+      output: simulated ? null : typeof usage.output === "number" ? usage.output : null,
+      costUsd: simulated ? null : typeof usage.costUsd === "number" ? usage.costUsd : null,
+      provider: simulated ? "mock" : "nebius",
+      model: simulated ? "scripted-mock" : raw.model ?? "unknown",
+      requestedAt: raw.createdAt,
+      simulated,
+    },
+  };
 }
 
 export async function listMessages(conversationId: ConversationId, limit = 200): Promise<ChatMessage[]> {
@@ -286,11 +370,44 @@ export async function listMessages(conversationId: ConversationId, limit = 200):
           ) ORDER BY created_at ASC`,
     args: [conversationId, limit],
   });
-  return rows.rows.map((r) => JSON.parse(String(r.data)) as ChatMessage);
+  return rows.rows.map((r) => normalizeMessage(JSON.parse(String(r.data)) as ChatMessage));
 }
 
 export async function clearMessages(conversationId: ConversationId): Promise<void> {
-  await (await db()).execute({ sql: "DELETE FROM messages WHERE conversation_id = ?", args: [conversationId] });
+  await (await db()).batch(
+    [
+      { sql: "DELETE FROM model_usage WHERE conversation_id = ?", args: [conversationId] },
+      { sql: "DELETE FROM messages WHERE conversation_id = ?", args: [conversationId] },
+    ],
+    "write",
+  );
+}
+
+export async function modelUsageSummary(): Promise<ModelUsageSummary[]> {
+  const rows = await (await db()).execute(
+    `SELECT provider, model, COUNT(*) AS requests,
+      SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(cost_usd) AS cost_usd,
+      SUM(CASE WHEN input_tokens IS NULL THEN 1 ELSE 0 END) AS unknown_input,
+      SUM(CASE WHEN output_tokens IS NULL THEN 1 ELSE 0 END) AS unknown_output,
+      SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknown_cost,
+      SUM(simulated) AS simulated_requests, SUM(fallback) AS fallback_requests,
+      MAX(requested_at) AS last_requested_at
+     FROM model_usage GROUP BY provider, model ORDER BY last_requested_at DESC`,
+  );
+  return rows.rows.map((row) => ({
+    provider: String(row.provider) as ModelProviderId | "mock",
+    model: String(row.model),
+    requests: Number(row.requests),
+    inputTokens: row.input_tokens == null ? null : Number(row.input_tokens),
+    outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+    costUsd: row.cost_usd == null ? null : Number(row.cost_usd),
+    unknownInputRequests: Number(row.unknown_input),
+    unknownOutputRequests: Number(row.unknown_output),
+    unknownCostRequests: Number(row.unknown_cost),
+    simulatedRequests: Number(row.simulated_requests),
+    fallbackRequests: Number(row.fallback_requests),
+    lastRequestedAt: String(row.last_requested_at),
+  }));
 }
 
 /** The newest message per conversation, for sidebar previews. */

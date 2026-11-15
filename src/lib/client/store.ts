@@ -1,6 +1,16 @@
 // Client state: one reducer folds the bootstrap payload, transcript loads and
 // the live SSE events into what the UI renders.
-import type { AppStatus, Bot, ChatMessage, ConversationId, ConversationSummary, ModelOption, Room, ServerEvent } from "@/lib/shared/types";
+import type {
+  AppStatus,
+  Bot,
+  ChatMessage,
+  ConversationId,
+  ConversationSummary,
+  ModelOption,
+  ModelProviderStatus,
+  Room,
+  ServerEvent,
+} from "@/lib/shared/types";
 import { messagePreview } from "./format";
 
 export interface AppState {
@@ -9,6 +19,7 @@ export interface AppState {
   bots: Bot[];
   rooms: Room[];
   models: ModelOption[];
+  modelProviders: ModelProviderStatus[];
   summaries: Record<ConversationId, ConversationSummary>;
   /** Transcripts loaded so far, keyed by conversation. */
   transcripts: Record<ConversationId, ChatMessage[]>;
@@ -31,6 +42,7 @@ export const initialState: AppState = {
   bots: [],
   rooms: [],
   models: [],
+  modelProviders: [],
   summaries: {},
   transcripts: {},
   active: null,
@@ -48,11 +60,12 @@ export type Action =
       bots: Bot[];
       rooms: Room[];
       models: ModelOption[];
+      modelProviders: ModelProviderStatus[];
       conversations: ConversationSummary[];
       liveViews: Record<string, string>;
     }
   | { type: "open"; id: ConversationId | null }
-  | { type: "models"; models: ModelOption[] }
+  | { type: "models"; models: ModelOption[]; providers: ModelProviderStatus[] }
   | { type: "transcript"; id: ConversationId; messages: ChatMessage[]; running: string[] }
   | { type: "cleared"; id: ConversationId }
   | { type: "event"; event: ServerEvent };
@@ -92,12 +105,13 @@ export function reducer(state: AppState, action: Action): AppState {
         bots: action.bots,
         rooms: action.rooms,
         models: action.models,
+        modelProviders: action.modelProviders,
         summaries,
         liveViews: action.liveViews,
       };
     }
     case "models":
-      return { ...state, models: action.models };
+      return { ...state, models: action.models, modelProviders: action.providers };
     case "open": {
       if (!action.id) return { ...state, active: null };
       const prev = state.summaries[action.id];

@@ -4,13 +4,23 @@ import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, BotInput, SkillSummary } from "@/lib/shared/types";
+import type { Bot, BotInput, ModelSelection, ModelTaskType, SkillSummary } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Drawer, Field, Mascot, Segmented, Toggle, inputClass } from "./ui";
 import { useConnections } from "@/lib/client/use-connections";
 
 export const BOT_COLORS = ["#3b82f6", "#f59e0b", "#ec4899", "#22c55e", "#8b5cf6", "#14b8a6", "#ef4444", "#eab308", "#f4f4f4"];
+
+const MODEL_TASKS: { id: ModelTaskType; label: string }[] = [
+  { id: "general", label: "General conversation" },
+  { id: "research", label: "Research" },
+  { id: "coding", label: "Coding" },
+  { id: "data_analysis", label: "Data analysis" },
+  { id: "planning", label: "Planning" },
+];
+
+const modelKey = (selection?: ModelSelection | null) => selection ? `${selection.providerId}:${selection.model}` : "";
 
 function blankBot(defaultModel: string): BotInput {
   return {
@@ -21,6 +31,7 @@ function blankBot(defaultModel: string): BotInput {
     emoji: "",
     color: BOT_COLORS[Math.floor(Math.random() * BOT_COLORS.length)],
     model: defaultModel,
+    modelProvider: "nebius",
     tools: { webSearch: true, memory: true, codeMode: false, browser: false, askUser: true },
     approval: "ask",
     approvalPermissions: [],
@@ -65,7 +76,9 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
   const [skillLoadError, setSkillLoadError] = useState<string | null>(null);
   const keys = state.status?.keys;
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
-  const modelSupportsTools = state.models.find((model) => model.id === form.model)?.tools ?? false;
+  const primarySelection = { providerId: form.modelProvider ?? "nebius", model: form.model } as const;
+  const modelSupportsTools = state.models.find((model) => model.providerId === primarySelection.providerId && model.id === primarySelection.model)?.tools ?? false;
+  const preferenceModels = state.models.filter((model) => model.available && (!Object.values(form.tools).some(Boolean) || model.tools));
   const availableSkillTools = new Set<string>();
   if (modelSupportsTools && form.tools.webSearch && keys?.tavily) {
     availableSkillTools.add("web_search");
@@ -233,10 +246,76 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
         {/* Not a <label>: the picker holds buttons and its own search field. */}
         <div>
           <span className="mb-1.5 block text-[12.5px] font-medium text-mute">Model</span>
-          <ModelPicker value={form.model} onChange={(id) => set("model", id)} />
+          <ModelPicker
+            value={primarySelection}
+            onChange={(selection) => {
+              setErrorMessage(null);
+              setForm((current) => ({ ...current, model: selection.model, modelProvider: selection.providerId }));
+            }}
+          />
           <span className="mt-1.5 block text-[12px] leading-snug text-faint">
-            {state.status?.mock ? "Mock mode: replies come from a scripted model until NEBIUS_API_KEY is set." : "Open-source models on Nebius Token Factory."}
+            {!state.models.some((model) => model.available && model.providerId === primarySelection.providerId && model.id === primarySelection.model)
+              ? form.fallbackModel
+                ? "Primary model is unavailable; the configured fallback will be selected before the turn starts."
+                : primarySelection.providerId === "nebius" && !keys?.nebius
+                  ? "Mock mode: replies are scripted until NEBIUS_API_KEY is configured."
+                : "This model is unavailable. Requests will fail clearly; no unavailable model is silently substituted."
+              : primarySelection.providerId === "ollama"
+                ? "Local Ollama model. Credentials and endpoint configuration remain on the server."
+                : "Nebius Token Factory model."}
           </span>
+          <details className="mt-3 rounded-2xl bg-raised px-4 py-3">
+            <summary className="cursor-pointer text-[13px] font-medium text-ink">Routing and fallback</summary>
+            <p className="mt-2 text-[12px] leading-relaxed text-faint">
+              Task routes use only available models. The explicit fallback is selected before a turn starts; requests are never replayed on another model after tool activity.
+            </p>
+            <div className="mt-3">
+              <Field label="Fallback model">
+              <select
+                className={inputClass}
+                value={modelKey(form.fallbackModel)}
+                onChange={(event) => {
+                  const selected = preferenceModels.find((model) => `${model.providerId}:${model.id}` === event.target.value);
+                  set("fallbackModel", selected ? { providerId: selected.providerId, model: selected.id } : null);
+                }}
+              >
+                <option value="">No fallback</option>
+                {preferenceModels.map((model) => (
+                  <option key={`${model.providerId}:${model.id}`} value={`${model.providerId}:${model.id}`}>
+                    {model.providerId === "nebius" ? "Nebius" : "Ollama"} · {model.label}
+                  </option>
+                ))}
+              </select>
+              </Field>
+            </div>
+            <div className="mt-3 space-y-3">
+              {MODEL_TASKS.map((task) => (
+                <Field key={task.id} label={`${task.label} model`}>
+                  <select
+                    className={inputClass}
+                    value={modelKey(form.modelRouting?.[task.id])}
+                    onChange={(event) => {
+                      const selected = preferenceModels.find((model) => `${model.providerId}:${model.id}` === event.target.value);
+                      setErrorMessage(null);
+                      setForm((current) => {
+                        const modelRouting = { ...current.modelRouting };
+                        if (selected) modelRouting[task.id] = { providerId: selected.providerId, model: selected.id };
+                        else delete modelRouting[task.id];
+                        return { ...current, modelRouting };
+                      });
+                    }}
+                  >
+                    <option value="">Use default model</option>
+                    {preferenceModels.map((model) => (
+                      <option key={`${model.providerId}:${model.id}`} value={`${model.providerId}:${model.id}`}>
+                        {model.providerId === "nebius" ? "Nebius" : "Ollama"} · {model.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ))}
+            </div>
+          </details>
         </div>
 
         <div>

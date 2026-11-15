@@ -53,6 +53,10 @@ export interface Bot {
   emoji: string;
   color: string;
   model: string;
+  /** Missing on legacy records; defaults to Nebius Token Factory. */
+  modelProvider?: ModelProviderId;
+  fallbackModel?: ModelSelection;
+  modelRouting?: Partial<Record<ModelTaskType, ModelSelection>>;
   tools: BotTools;
   /** Connection ids this bot may use: `composio:<toolkit>` or `mcp:<serverId>`. */
   connections: string[];
@@ -65,7 +69,11 @@ export interface Bot {
   createdAt: string;
 }
 
-export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections"> & { handle?: string; connections?: string[] };
+export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections" | "fallbackModel"> & {
+  handle?: string;
+  connections?: string[];
+  fallbackModel?: ModelSelection | null;
+};
 
 export interface AgentConfiguration {
   name: string;
@@ -73,6 +81,7 @@ export interface AgentConfiguration {
   description: string;
   instructions: string;
   model: string;
+  modelProvider?: ModelProviderId;
   tools: BotTools;
   skills: string[];
   memory: { enabled: boolean; guidance: string };
@@ -152,7 +161,16 @@ export interface ChatMessage {
   status: MessageStatus;
   parts: Part[];
   model?: string;
-  usage?: { input: number; output: number; costUsd: number | null };
+  usage?: {
+    input: number | null;
+    output: number | null;
+    costUsd: number | null;
+    provider: ModelProviderId | "mock";
+    model: string;
+    requestedAt: string;
+    simulated: boolean;
+    fallbackFrom?: ModelSelection;
+  };
   route?: RouteNote;
   error?: string;
 }
@@ -167,7 +185,9 @@ export interface ConversationSummary {
 export interface ModelOption {
   id: string;
   label: string;
+  /** Model family or upstream publisher, retained for the picker. */
   provider: string;
+  providerId: ModelProviderId;
   context: number;
   tools: boolean;
   reasoning: boolean;
@@ -175,6 +195,38 @@ export interface ModelOption {
   inputPerM: number | null;
   outputPerM: number | null;
   live: boolean;
+  available: boolean;
+}
+
+export type ModelProviderId = "nebius" | "ollama";
+export type ModelTaskType = "general" | "research" | "coding" | "data_analysis" | "planning";
+
+export interface ModelSelection {
+  providerId: ModelProviderId;
+  model: string;
+}
+
+export interface ModelProviderStatus {
+  providerId: ModelProviderId;
+  label: string;
+  available: boolean;
+  configured: boolean;
+  message?: string;
+}
+
+export interface ModelUsageSummary {
+  provider: ModelProviderId | "mock";
+  model: string;
+  requests: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  unknownInputRequests: number;
+  unknownOutputRequests: number;
+  unknownCostRequests: number;
+  simulatedRequests: number;
+  fallbackRequests: number;
+  lastRequestedAt: string;
 }
 
 export interface AppStatus {

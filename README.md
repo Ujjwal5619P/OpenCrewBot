@@ -16,7 +16,7 @@ Built with [Mastra](https://mastra.ai) and [Nebius Token Factory](https://tokenf
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Built by Studio1 team](https://img.shields.io/badge/built%20by-Studio1%20team-ff6b1a)](https://studio1hq.com)
 
-Run OpenCrewBot on your own machine. Bring a Nebius Token Factory key for the models, and optionally Tavily, Browserbase and Jev keys for search, browsing and room routing. With no keys at all, it runs in mock mode so you can try the whole interface first.
+Run OpenCrewBot on your own machine. Use hosted models from Nebius Token Factory or local models from Ollama; Tavily, Browserbase and Jev are optional keys for search, browsing and room routing. Without an available model provider, it runs in mock mode so you can try the interface first.
 
 </div>
 
@@ -42,9 +42,9 @@ OpenCrewBot treats AI as a messaging app. Every contact in the sidebar is a bot 
 
 ### Bots
 
-Give each bot a name, a role, instructions, a model and a set of tools. Each reply shows its tokens and cost.
+Give each bot a name, a role, instructions, a provider/model and a set of tools. Optional task routes and an explicit fallback are saved per bot. Each reply shows reported tokens and an estimated cost when the provider supplies enough information.
 
-**Choose the model from the bot's Details.** **Change** opens a model sheet with three suggested picks (fastest, best all-rounder, strongest) and every model in Nebius Token Factory's live catalog, with search, context size, tool support and price. A new model applies from the bot's next reply, with no restart. Automatic routing, where Jev picks a model for each message, is coming soon.
+**Choose the model from the bot's Details.** **Change** opens a searchable model sheet with Nebius Token Factory discovery and up to 20 installed Ollama models. Task routes can select General conversation, Research, Coding, Data analysis, and Planning models. An optional fallback is selected before the turn starts; OpenCrewBot never retries a request on another provider after a model call begins. A model change applies to the bot's next reply without a restart.
 
 The details panel keeps a short summary of the bot, with the full editor one click away. Changes apply from the bot's next reply.
 
@@ -52,7 +52,7 @@ The details panel keeps a short summary of the bot, with the full editor one cli
 
 Choose **Create Agent with AI** in the sidebar and describe the specialist you need. OpenCrewBot proposes a name, role, instructions, model, tools, memory guidance, approval setting, skills guidance and expected output format. Review the draft and edit it in the existing bot form before saving; the usual `createBot()` path stores the bot and creates its private `MEMORY.md`.
 
-With `NEBIUS_API_KEY`, the app uses the configured Nebius model for live structured generation. Without that key, it creates a clearly labelled **simulated configuration** using deterministic local rules; no AI inference is claimed. In either mode, unavailable search or browser tools are disabled, approval defaults to **Ask first**, and no external integrations or skills runtime are added. Skills and output format are included as editable instructions.
+With an available provider, the app uses a tool-capable configured model for live structured generation. Without an available provider, it creates a clearly labelled **simulated configuration** using deterministic local rules; no AI inference is claimed. In either mode, unavailable search or browser tools are disabled, approval defaults to **Ask first**, and no external integrations or skills runtime are added. Skills and output format are included as editable instructions.
 
 ### Rooms
 
@@ -142,13 +142,13 @@ OpenCrewBot doesn't build its own agent loop. Each bot gets a Mastra [`AgentCont
 
 ![Diagram](/public/image.png)
 
-All keys stay on the server. Without a Nebius key, bots run on a scripted mock model that streams replies and calls the real tools, so every part of the interface can be tried before you connect anything.
+Provider credentials stay on the server. A bot configured for Nebius uses the scripted mock model only when Nebius is not configured and no explicit fallback is set. Ollama is used only when its server endpoint is reachable and the selected model is discovered; mock responses are labelled simulated and have unknown token/cost values.
 
 ### Chief of Staff executions
 
 The execution API accepts one complex instruction and returns a validated task plan, including assigned bots, required capabilities and dependencies. Independent tasks run concurrently; dependent tasks receive completed outputs as context. Task turns use the existing `AgentController` runtime, so bot tool permissions and approval prompts are unchanged.
 
-With `NEBIUS_API_KEY`, planning uses the configured model of the best-matching planning bot. Without it, the API creates a deterministic simulated plan and marks it `plannerMode: "simulated"` with the label `Simulated planning (mock mode)`; it does not report simulated work as AI inference.
+Planning uses the configured Planning route (or the bot's default model) of the best-matching planning bot. If no provider is available for that selection, the API creates a deterministic simulated plan and marks it `plannerMode: "simulated"`; it does not report simulated work as AI inference.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -195,7 +195,9 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 
 | Variable | What it turns on |
 | --- | --- |
-| `NEBIUS_API_KEY` | Real models from [Nebius Token Factory](https://tokenfactory.nebius.com). Without it, bots use the mock model. |
+| `NEBIUS_API_KEY` | Hosted models from [Nebius Token Factory](https://tokenfactory.nebius.com). Without it, a Nebius selection uses mock mode only when no fallback is configured. |
+| `OLLAMA_BASE_URL` | Optional Ollama server URL (default `http://127.0.0.1:11434`). Up to 20 discovered installed models appear in the model picker. |
+| `OLLAMA_API_KEY` | Optional server-side key for an authenticated Ollama-compatible endpoint. Never sent to the browser or agent prompt. |
 | `TAVILY_API_KEY` | Web search, page reading and site crawls. |
 | `BROWSERBASE_API_KEY` | Cloud browsers for bots with the Browser tool. |
 | `BROWSERBASE_PROJECT_ID` | Optional. Inferred from the key when empty. |
@@ -206,7 +208,7 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 | `OPENCREWBOT_DATA_DIR` | Where data lives (default `./data`). |
 | `OPENCREWBOT_ALLOWED_HOSTS` | Extra host names the API answers to, comma-separated. Only for deliberate setups behind your own sign-in. |
 
-**No keys yet?** Try these in a bot's chat in mock mode:
+**No hosted or local model provider yet?** Try these in a bot's chat in mock mode:
 
 - `remember that I like short answers` calls the memory tool and writes to `MEMORY.md`.
 - `remember that release freeze is approved for the project` calls the shared-memory tool when that agent has been explicitly authorized.
@@ -220,7 +222,8 @@ Add your keys to `.env`, then restart `pnpm dev`. Every key is optional:
 Bots, rooms, chat transcripts, executions, scheduled workflows and their run history are stored in SQLite at `data/opencrewbot.db`. Mastra keeps each bot's model-side thread history in `data/mastra.db`. Private bot memories are `data/workspaces/<botId>/MEMORY.md`; shared project memory is `data/PROJECT_MEMORY.md`, with its authorized bot IDs stored in the existing SQLite settings table. Nothing leaves your machine except calls to the services you configure:
 
 - **Nebius Token Factory** receives each bot's system prompt (including its private `MEMORY.md`), the conversation, and tool results. Shared project memory is included in tool results only after an authorized agent explicitly reads it.
-- **Chief of Staff planning** sends the instruction and available bot role descriptions/instructions to the selected Nebius model. Each assigned bot receives its task and completed dependency outputs.
+- **Ollama** receives the prompt and tool results at the server-configured endpoint. By default it runs on `127.0.0.1`; an explicitly configured remote endpoint receives the same model input.
+- **Chief of Staff planning** sends the instruction and available bot role descriptions/instructions to the selected configured model. Each assigned bot receives its task and completed dependency outputs.
 - **Tavily** receives search queries and the URLs a bot reads or crawls.
 - **Browserbase** runs the cloud browser, so it sees the pages a bot visits and anything typed into them. Sessions are released when a bot is reset or deleted, and expire after `BROWSERBASE_SESSION_MINUTES`.
 - **Jev** receives the room name, member names and descriptions, the last few room messages and the new message, when an Auto room has no @mention.
@@ -239,7 +242,7 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Bots | Name, role, instructions, color, model, tools and approval level per bot; pin, search, unread counts, live typing status |
 | Agent creation | Natural-language agent drafts with live or explicitly simulated generation, editable before creation |
 | Skills | Eight reusable, on-demand skills assigned per bot, with required-tool availability checks |
-| Models | Model sheet with suggested picks, search and the live Token Factory catalog; switch without a restart; tokens and cost on every reply |
+| Models | Per-bot Nebius/Ollama selection, task routing, explicit pre-turn fallback, and a persisted usage summary; unknown usage/cost stays unknown |
 | Connections | Composio apps with one-click sign-in, your own MCP servers (GitHub preset), per-bot access, approval for actions |
 | Chat | Streaming Markdown, reasoning, tool steps with sources, Stop, and messages queued while a bot is busy |
 | Rooms | @mentions, `@everyone`, Auto routing with Jev, Lead and Everyone modes, hand-offs, bounded task delegation, research sharing, Q&A and verification |
@@ -248,17 +251,16 @@ It assumes one local owner and has no sign-in. To keep it that way, `pnpm dev` a
 | Approvals | Ask First, Controlled Access and Full Access; persisted Approval Centre, plus ask-you question cards |
 | Browser | Browserbase session per bot, embedded live view with takeover, release on reset |
 | Code mode | Multi-tool TypeScript in a QuickJS sandbox with no filesystem or network access |
-| Mock mode | A scripted model that exercises the real tools, approvals and streaming without any keys |
+| Mock mode | Labelled scripted model responses; token usage and cost remain unknown |
 
 Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do not call live planning or bot models.
 
-**What's been verified.** On October 13 and 14, 2026, these were tested locally with the mock model: streaming, tool calls, memory writes, approvals (Allow, Deny, and Stop while waiting), question cards, room @mentions and hand-offs, restart recovery, and the production build. The Browserbase path was tested by driving a local Chrome over the same CDP connection. MCP servers were tested against DeepWiki's public server (add, test, and loading its tools into a bot). The live model list comes from Token Factory, and Mastra's router was checked to accept every model on it. **Still to verify with live services:** Composio sign-in and app actions, Browserbase sessions, Jev routing, and how reliably each open model calls tools.
+**What's been verified.** Existing Module A–I flows and the mock provider are covered by the repository tests. Model-provider catalog and routing behavior are tested with deterministic fixtures. No live Ollama inference, remote Ollama authentication, Nebius inference fallback, or per-model cost metadata was tested for this change. **Still to verify with live services:** Composio sign-in and app actions, Browserbase sessions, Jev routing, and how reliably each model calls tools.
 
 ### Extending it
 
 - Let bots delegate to each other in direct chats with Mastra subagents.
 - Add scheduled routines with Mastra schedules.
-- Let Jev pick the model for each message (fast for simple asks, strong for hard ones). It's shown as "coming soon" in the model sheet.
 - Let you talk to bots from Slack or Discord with Mastra Channels.
 - Add sign-in and multiple users before deploying it anywhere shared.
 - Add voice: speak to a bot and have it read replies aloud.
@@ -266,6 +268,7 @@ Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do
 ## Project layout
 
 - `src/lib/server/runtime.ts`: the harness glue. One `AgentController` per bot, one session per conversation, events folded into chat messages.
+- `src/lib/server/models.ts`: provider/model discovery, capability checks, request-scoped routing, safe pre-turn fallback and pricing metadata.
 - `src/lib/server/chief-of-staff.ts` and `execution-service.ts`: validated planning, persistent task scheduling and execution recovery.
 - `src/lib/server/execution-core.ts`: dependency validation, retries and bounded parallel task execution.
 - `src/lib/server/tools.ts`: which tools a bot gets, their approval categories, and how each looks in chat.
@@ -275,7 +278,7 @@ Run focused task-graph and SQLite-history tests with `pnpm test`. These tests do
 - `src/lib/server/memory-files.ts`: private/shared Markdown memory reads, writes, provenance and redaction.
 - `src/lib/server/project-memory.ts`: the persisted allowlist for shared project memory.
 - `src/lib/server/browserbase.ts`: creates, announces and releases each bot's Browserbase session.
-- `src/lib/server/mock-model.ts`: the scripted model used without a Nebius key.
+- `src/lib/server/mock-model.ts`: the scripted model used when no configured model is available.
 - `src/components/`: the chat interface. `src/lib/client/store.ts` folds server events into state.
 
 ## Contributing

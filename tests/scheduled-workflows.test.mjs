@@ -54,7 +54,7 @@ test("persists schedules, prevents duplicate runs, recovers claims, and reports 
       perWorkflowHistory: true,
       approvalRequired: true,
       deleteWorks: true,
-      schemaVersion: 6,
+      schemaVersion: 7,
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });

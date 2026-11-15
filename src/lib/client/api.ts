@@ -14,6 +14,8 @@ import type {
   Execution,
   McpServer,
   ModelOption,
+  ModelProviderStatus,
+  ModelUsageSummary,
   Room,
   RoomInput,
   ScheduledWorkflow,
@@ -41,6 +43,7 @@ export interface Bootstrap {
   rooms: Room[];
   conversations: ConversationSummary[];
   models: ModelOption[];
+  modelProviders: ModelProviderStatus[];
   /** botId → Browserbase live view URL for bots with an open browser. */
   liveViews: Record<string, string>;
 }
@@ -58,7 +61,9 @@ export interface ScheduledWorkflowDraft {
 export const api = {
   bootstrap: () => call<Bootstrap>("/api/bootstrap"),
   skills: () => call<{ skills: SkillSummary[] }>("/api/skills"),
-  models: (refresh = false) => call<{ models: ModelOption[] }>(`/api/models${refresh ? "?refresh=1" : ""}`),
+  models: (refresh = false) =>
+    call<{ models: ModelOption[]; providers: ModelProviderStatus[] }>(`/api/models${refresh ? "?refresh=1" : ""}`),
+  modelUsage: () => call<{ usage: ModelUsageSummary[] }>("/api/model-usage"),
   createBot: (input: BotInput) => call<{ bot: Bot }>("/api/bots", { method: "POST", json: input }),
   generateAgent: (description: string) =>
     call<AgentConfigurationResult>("/api/bots/generate", { method: "POST", json: { description } }),

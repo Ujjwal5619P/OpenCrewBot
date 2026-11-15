@@ -3,9 +3,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Bot, Execution, PlannerMode, TaskCapability } from "@/lib/shared/types";
 import { InputError } from "./errors";
-import { isMock } from "./config";
 import { listBots } from "./db";
-import { DEFAULT_MODEL } from "./models";
+import { mastraModelForResolution, resolveModelForBot } from "./models";
 import { createExecutionTasks } from "./execution-core";
 
 const PLAN_LIMIT = 30;
@@ -157,12 +156,13 @@ export async function planExecution(rawInstruction: unknown): Promise<Execution>
   const bots = await listBots();
   if (!bots.length) throw new InputError("Create at least one bot before starting an execution.");
 
-  if (isMock()) {
+  const plannerBot = choosePlanner(bots);
+  const resolution = await resolveModelForBot(plannerBot, "planning");
+  if (resolution.simulated) {
     const draft = PlanSchema.parse(simulatedPlan(instruction, bots));
     return makeExecution(instruction, draft, bots, "simulated", "Simulated planning (mock mode)");
   }
 
-  const plannerBot = choosePlanner(bots);
   let draft: PlanDraft;
   try {
     const planner = new Agent({
@@ -170,7 +170,7 @@ export async function planExecution(rawInstruction: unknown): Promise<Execution>
       name: "Chief of Staff",
       instructions:
         "You are the OpenCrewBot Chief of Staff. Produce concise, executable plans using only the available bots. A task marked dependent must wait for its dependencies.",
-      model: `nebius/${plannerBot.model || DEFAULT_MODEL}`,
+      model: mastraModelForResolution(resolution),
     });
     const result = await planner.generate(planningPrompt(instruction, bots), {
       maxSteps: 1,
@@ -181,5 +181,6 @@ export async function planExecution(rawInstruction: unknown): Promise<Execution>
     console.error("[opencrewbot] AI task planning failed.", error);
     throw new Error("AI planning failed. Check the configured model and try again.");
   }
-  return makeExecution(instruction, draft, bots, "ai", `AI planning via ${plannerBot.name}`);
+  const source = `${resolution.providerId} · ${resolution.model}${resolution.fallbackFrom ? " (fallback)" : ""}`;
+  return makeExecution(instruction, draft, bots, "ai", `AI planning via ${plannerBot.name} (${source})`);
 }

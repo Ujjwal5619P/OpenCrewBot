@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentConfiguration, BotInput, BotTools, ModelOption } from "@/lib/shared/types";
+import type { AgentConfiguration, BotInput, BotTools, ModelOption, ModelProviderId } from "@/lib/shared/types";
 
 const toolsSchema = z
   .object({
@@ -18,6 +18,7 @@ export const AgentConfigurationSchema = z
     description: z.string().trim().min(1).max(200),
     instructions: z.string().trim().min(1).max(6000),
     model: z.string().trim().min(1).max(160),
+    modelProvider: z.enum(["nebius", "ollama"]).default("nebius"),
     tools: toolsSchema,
     skills: z.array(z.string().trim().min(1).max(60)).min(1).max(8),
     memory: z
@@ -42,7 +43,7 @@ export type ParsedAgentConfiguration = z.infer<typeof AgentConfigurationSchema>;
 export class AgentConfigurationError extends Error {}
 
 export interface AgentConfigurationConstraints {
-  models: readonly Pick<ModelOption, "id" | "tools">[];
+  models: readonly (Pick<ModelOption, "id" | "tools"> & { providerId?: ModelProviderId })[];
   availableTools: BotTools;
 }
 
@@ -61,7 +62,9 @@ export function validateAgentConfiguration(value: unknown, constraints: AgentCon
     if (skills.has(key)) throw new AgentConfigurationError(`Duplicate skill: ${skill}`);
     skills.add(key);
   }
-  const model = constraints.models.find((candidate) => candidate.id === parsed.data.model);
+  const model = constraints.models.find(
+    (candidate) => candidate.id === parsed.data.model && (candidate.providerId ?? "nebius") === parsed.data.modelProvider,
+  );
   if (!model) throw new AgentConfigurationError("Choose a model from the available model catalog.");
   if (!model.tools && Object.values(parsed.data.tools).some(Boolean)) {
     throw new AgentConfigurationError("The selected model cannot use the configured tools.");
@@ -79,7 +82,11 @@ export function validateAgentConfiguration(value: unknown, constraints: AgentCon
   return { configuration: { ...configuration, tools: safeTools }, unavailableTools };
 }
 
-export function simulatedAgentConfiguration(description: string, model: string): AgentConfiguration {
+export function simulatedAgentConfiguration(
+  description: string,
+  model: string,
+  modelProvider: ModelProviderId = "nebius",
+): AgentConfiguration {
   const roleMatch = description.match(/(?:create|build|design|make)\s+(?:a|an)\s+(.+?)(?:\s+(?:that|which|who)\b|[,.!?]|$)/i);
   const role = (roleMatch?.[1] ?? "Specialist Agent").replace(/\b(agent|assistant)\b/gi, "").trim() || "Specialist Agent";
   const name = role
@@ -115,6 +122,7 @@ export function simulatedAgentConfiguration(description: string, model: string):
     description: summary.length > 200 ? `${summary.slice(0, 197).trimEnd()}...` : summary,
     instructions: `You are a specialized assistant for ${role}. Follow this requested scope: ${summary}. Be accurate, state uncertainty clearly, and do not claim access to tools that are disabled.`,
     model,
+    modelProvider,
     tools,
     skills: [...new Set(skills)].slice(0, 8),
     memory: {
@@ -142,6 +150,7 @@ export function agentConfigurationToBotInput(configuration: AgentConfiguration):
     description: configuration.description,
     instructions,
     model: configuration.model,
+    modelProvider: configuration.modelProvider,
     tools: { ...configuration.tools },
     approval: "ask",
     emoji: "🤖",
