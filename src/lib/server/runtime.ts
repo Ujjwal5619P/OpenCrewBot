@@ -22,8 +22,9 @@ import {
   conversationGeneration,
   getBot,
   saveMessage,
+  listMessages,
 } from "./db";
-import { projectMemoryThreadId } from "./project-memory";
+import { canAccessProjectMemory, projectMemoryThreadId } from "./project-memory";
 import {
   APPROVAL_REQUEST_TTL_MS,
   approvalActionLabel,
@@ -46,16 +47,19 @@ import {
 import { createMockModel } from "./mock-model";
 import { announceLiveView, createSession, releaseSession } from "./browserbase";
 import { buildConnectorTools, connectionsVersion } from "./connectors";
+import { listGitHubRepositoriesDirect } from "./composio";
+import { isGitHubRepositoryListRequest } from "./github-request";
 import { systemPrompt } from "./prompt";
 import { buildTools, toolCategory, toolLabel, toolPreview, toolSources } from "./tools";
 import { createKeyedLock } from "./execution-core";
+import { classifyFastChat, requestOllamaFastReply, shouldUseDirectMessageFastPath } from "./fast-chat";
 
 // ── shared state that must survive Next.js hot reloads ─────────────────
 
 interface BotRuntime {
   signature: string;
   /** The latest saved bot; the system prompt reads it on every model call. */
-  holder: { bot: Bot };
+  holder: { bot: Bot; resolution?: ModelResolution };
   controller: AgentController;
   toolNames: Set<string>;
   ready: Promise<void>;
@@ -110,6 +114,7 @@ async function signatureOf(bot: Bot): Promise<string> {
     skillIds: bot.skillIds ?? [],
     connections: bot.connections,
     connectionsVersion: bot.connections.length ? await connectionsVersion() : 0,
+    sharedProjectMemoryAuthorized: await canAccessProjectMemory(bot.id),
   });
 }
 
@@ -130,10 +135,10 @@ async function createBrowser(bot: Bot): Promise<MastraBrowser | undefined> {
 }
 
 async function buildRuntime(bot: Bot): Promise<BotRuntime> {
-  const holder = { bot };
+  const holder: BotRuntime["holder"] = { bot };
   const memory = new Memory({ storage: state.storage, options: { lastMessages: 40 } });
   const connectors = await buildConnectorTools(bot, `bot-${bot.id}-${Date.now()}`);
-  const builtIn = buildTools(bot, new Set(Object.keys(connectors.tools)));
+  const builtIn = buildTools(bot, new Set(Object.keys(connectors.tools)), await canAccessProjectMemory(bot.id));
   const tools = { ...connectors.tools, ...builtIn.tools };
   const capabilities = [...builtIn.capabilities, ...connectors.capabilities];
   const agent = new Agent({
@@ -142,8 +147,13 @@ async function buildRuntime(bot: Bot): Promise<BotRuntime> {
     instructions: () => systemPrompt(holder.bot, capabilities, builtIn.instructions),
     model: ({ requestContext }) => {
       const value: unknown = requestContext?.get(MODEL_REQUEST_CONTEXT_KEY);
-      if (!isModelResolution(value)) throw new Error("No valid model was resolved for this turn.");
-      const resolution = value;
+      // Mastra may re-enter the model router while resuming a suspended tool
+      // approval without forwarding the original RequestContext. Keep the
+      // resolution selected for this bot's active/latest turn as a safe fallback.
+      const resolution = isModelResolution(value) ? value : holder.resolution;
+      if (!isModelResolution(resolution)) {
+        throw new Error("No model is configured for this bot. Select an available model in Scout settings and retry.");
+      }
       return resolution.simulated ? createMockModel(holder.bot.name) : mastraModelForResolution(resolution);
     },
     tools,
@@ -330,8 +340,8 @@ class TurnFolder {
     if (this.finished) return;
     switch (event.type) {
       case "message_update": {
+        // Reasoning is internal model output; never persist or publish it to chat.
         if (event.event.type === "text-delta") this.streamInto("text", event.id, event.event.delta);
-        else if (event.event.type === "reasoning-delta") this.streamInto("reasoning", event.id, event.event.delta);
         break;
       }
       case "tool_start": {
@@ -536,8 +546,126 @@ export function runTurn(request: TurnRequest): Promise<ChatMessage | null> {
   return next;
 }
 
+async function executeDirectGitHubRepositoryListing(request: TurnRequest, bot: Bot): Promise<ChatMessage> {
+  const message: ChatMessage = {
+    id: randomUUID(), conversationId: request.conversationId, role: "bot", botId: bot.id,
+    createdAt: new Date().toISOString(), status: "streaming", parts: [],
+    model: "GitHub API (direct)", route: request.route,
+  };
+  setRunning(request.conversationId, bot.id, true);
+  try {
+    await saveMessage(message);
+    publish({ type: "message", message });
+    request.onProgress?.(message);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let result: string;
+    try {
+      result = await Promise.race([
+        listGitHubRepositoriesDirect(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("GitHub repository listing timed out after 90 seconds.")), 90_000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    message.parts = [{ kind: "text", text: result }];
+    message.status = "done";
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    message.parts = [{ kind: "text", text: `GitHub repository listing failed: ${detail}` }];
+    message.error = detail;
+    message.status = "error";
+  } finally {
+    await saveMessage(message);
+    publish({ type: "message", message });
+    request.onProgress?.(message);
+    setRunning(request.conversationId, bot.id, false);
+  }
+  return message;
+}
+
+async function executeFastChatTurn(
+  bot: Bot,
+  conversationId: ConversationId,
+  content: string,
+  reply: string | null,
+  onProgress?: (message: ChatMessage) => void,
+): Promise<ChatMessage> {
+  const selection = bot.modelRouting?.general ?? { providerId: bot.modelProvider ?? "nebius", model: bot.model };
+  const message: ChatMessage = {
+    id: randomUUID(), conversationId, role: "bot", botId: bot.id,
+    createdAt: new Date().toISOString(), status: "streaming", parts: [], model: selection.model,
+  };
+  setRunning(conversationId, bot.id, true);
+  try {
+    await saveMessage(message);
+    publish({ type: "message", message });
+    let answer = reply;
+    let inputTokens: number | null = null;
+    let outputTokens: number | null = null;
+    if (answer === null) {
+      const previous = (await listMessages(conversationId, 10)).filter((item) => item.id !== message.id && item.role !== "notice");
+      const history = previous.flatMap((item) => {
+        const text = item.parts.filter((part): part is Extract<Part, { kind: "text" }> => part.kind === "text").map((part) => part.text).join("\n").trim();
+        if (!text) return [];
+        return [{ role: item.role === "user" ? "user" as const : "assistant" as const, content: text.slice(0, 6000) }];
+      }).slice(-8).map((item) => ({ ...item, content: item.content.slice(-2500) }));
+      const system = [
+        `You are ${bot.name}${bot.title ? `, ${bot.title}` : ""}.`,
+        bot.description,
+        bot.instructions.slice(0, 2500),
+        "Answer the user's latest message directly and naturally. Output only the final answer. Never include internal thoughts, analysis, planning, self-talk, hidden reasoning, or phrases such as 'Let me think' / 'The user asked'. Do not narrate how you will answer. Do not reveal private reasoning. Do not call tools. Keep ordinary answers concise; expand only when asked.",
+      ].filter(Boolean).join("\n\n");
+      const result = await requestOllamaFastReply({
+        baseUrl: process.env.OLLAMA_BASE_URL?.trim() || "http://127.0.0.1:11434",
+        model: selection.model,
+        messages: [{ role: "system", content: system }, ...history],
+        apiKey: process.env.OLLAMA_API_KEY,
+      });
+      answer = result.content;
+      inputTokens = result.inputTokens;
+      outputTokens = result.outputTokens;
+    }
+    message.parts = [{ kind: "text", text: answer }];
+    message.status = "done";
+    message.usage = {
+      input: inputTokens, output: outputTokens, costUsd: null,
+      provider: reply === null ? "ollama" : selection.providerId,
+      model: selection.model, requestedAt: message.createdAt, simulated: false,
+    };
+  } catch (error) {
+    message.status = "error";
+    message.error = error instanceof Error ? error.message : String(error);
+    message.parts = [{ kind: "text", text: `I couldn't complete this quick reply: ${message.error}` }];
+  } finally {
+    onProgress?.(message);
+    await saveMessage(message).catch((error) => console.error("[opencrewbot] Could not persist fast-chat reply.", error));
+    publish({ type: "message", message });
+    setRunning(conversationId, bot.id, false);
+  }
+  return message;
+}
+
 async function executeTurn({ bot, conversationId, content, route, modelTask = "general", onProgress }: TurnRequest): Promise<ChatMessage> {
   const latest = (await getBot(bot.id)) ?? bot;
+  if (isGitHubRepositoryListRequest(content) && latest.connections.includes("composio:github")) {
+    return executeDirectGitHubRepositoryListing({ bot: latest, conversationId, content, route, modelTask, onProgress }, latest);
+  }
+  // Direct-message chat does not need room routing metadata to qualify for the
+  // lightweight path. For local Ollama bots, greetings are answered instantly
+  // and ordinary chat uses native /api/chat
+  // with think:false, no tools, bounded output and recent transcript context.
+  // Explicit integrations, research, coding and multi-step work still use Mastra.
+  const fastRoute = shouldUseDirectMessageFastPath({ modelTask, conversationId })
+    ? classifyFastChat(content)
+    : { kind: "agent" as const };
+  if (fastRoute.kind !== "agent") {
+    const selection = latest.modelRouting?.general ?? { providerId: latest.modelProvider ?? "nebius", model: latest.model };
+    if (fastRoute.kind === "static" || selection.providerId === "ollama") {
+      return executeFastChatTurn(latest, conversationId, content, fastRoute.kind === "static" ? fastRoute.reply : null, onProgress);
+    }
+  }
   const k = key(conversationId, latest.id);
   const folder = new TurnFolder(conversationId, latest, route, onProgress);
   setRunning(conversationId, latest.id, true);
@@ -549,6 +677,10 @@ async function executeTurn({ bot, conversationId, content, route, modelTask = "g
   try {
     const session = await sessionFor(latest, conversationId);
     const resolution = await resolveModelForBot(latest, modelTask);
+    // Preserve the selection for approval/suspension continuations where the
+    // framework may not propagate the original RequestContext.
+    const runtime = state.runtimes.get(latest.id);
+    if (runtime) runtime.holder.resolution = resolution;
     folder.setModelResolution(resolution);
     const requestContext = new RequestContext();
     requestContext.set(MODEL_REQUEST_CONTEXT_KEY, resolution);

@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 process.env.OPENCREWBOT_DATA_DIR = process.argv[2];
+process.env.OLLAMA_BASE_URL = "http://127.0.0.1:1";
+delete process.env.OLLAMA_API_KEY;
 delete process.env.NEBIUS_API_KEY;
 delete process.env.TAVILY_API_KEY;
 delete process.env.BROWSERBASE_API_KEY;

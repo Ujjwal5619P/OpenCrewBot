@@ -33,23 +33,33 @@ export interface ConnectorToolset {
 const appName = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1);
 
 export async function buildConnectorTools(bot: Bot, clientId: string): Promise<ConnectorToolset> {
-  const composioSlugs = bot.connections.filter((c) => c.startsWith("composio:")).map((c) => c.slice("composio:".length));
-  const mcpIds = bot.connections.filter((c) => c.startsWith("mcp:")).map((c) => c.slice("mcp:".length));
+  const composioSlugs = bot.connections
+    .filter((c) => c.startsWith("composio:"))
+    .map((c) => c.slice("composio:".length));
+  const mcpIds = bot.connections
+    .filter((c) => c.startsWith("mcp:"))
+    .map((c) => c.slice("mcp:".length));
   const tools: ToolsInput = {};
   const capabilities: string[] = [];
   let close = async () => {};
 
   if (composioSlugs.length && keys.composio()) {
     try {
-      Object.assign(tools, await composioTools(composioSlugs));
+      const loadedTools = await composioTools(composioSlugs);
+
+      Object.assign(tools, loadedTools);
       capabilities.push(
-        `Use the person's connected apps (${composioSlugs.map(appName).join(", ")}): find the right action with COMPOSIO_SEARCH_TOOLS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Actions ask the person first unless you have full access. If an app isn't connected, tell them to connect it in Connections.`,
+        `Use the person's connected apps (${composioSlugs.map(appName).join(", ")}). For GitHub repository listing, call github_list_repositories directly. Present its complete returned table and total verbatim, then stop the turn; do not call project memory or any other tool, and do not analyse repository descriptions. For other connected-app actions, discover actions with COMPOSIO_SEARCH_TOOLS and execute them with COMPOSIO_MULTI_EXECUTE_TOOL. Actions that change data require the person's approval unless you have Full access. If an app isn't connected, tell them to connect it in Connections.`,
       );
     } catch (error) {
-      capabilities.push(`Connected apps are switched on for you but couldn't load right now (${error instanceof Error ? error.message : "unknown error"}). Say so if asked.`);
+      capabilities.push(
+        `Connected apps are switched on for you but couldn't load right now (${error instanceof Error ? error.message : "unknown error"}). Say so if asked.`,
+      );
     }
   } else if (composioSlugs.length) {
-    capabilities.push("Connected apps are switched on for you, but no COMPOSIO_API_KEY is set, so you can't use them right now.");
+    capabilities.push(
+      "Connected apps are switched on for you, but no COMPOSIO_API_KEY is set, so you can't use them right now.",
+    );
   }
 
   if (mcpIds.length) {
@@ -60,7 +70,9 @@ export async function buildConnectorTools(bot: Bot, clientId: string): Promise<C
     close = result.close;
     const names = servers.filter((s) => mcpIds.includes(s.id)).map((s) => s.name);
     if (Object.keys(result.tools).length) {
-      capabilities.push(`Use tools from ${names.join(", ")} (the mcp_* tools). Actions that change things ask the person first unless you have full access.`);
+      capabilities.push(
+        `Use tools from ${names.join(", ")} (the mcp_* tools). Actions that change things ask the person first unless you have full access.`,
+      );
     }
     for (const e of result.errors) capabilities.push(`Couldn't connect to ${e}. Say so if asked.`);
   }

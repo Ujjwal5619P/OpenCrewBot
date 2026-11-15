@@ -73,28 +73,17 @@ async function writeState() {
     source: "project_decision",
     confidence: "confirmed",
   });
-  const toolsA = buildTools(bots[0]).tools;
-  const toolsB = buildTools(bots[1]).tools;
+  const toolsA = buildTools(bots[0], new Set(), true).tools;
+  const toolsB = buildTools(bots[1], new Set(), false).tools;
   const toolContext = { agent: { threadId: "dm:agent-a:0" }, abortSignal: new AbortController().signal };
   const readable = await toolsA.project_memory_read.execute({}, toolContext);
   await toolsA.project_memory_add.execute({ note: "This claim still needs independent checking.", section: "Research" }, toolContext);
 
   const beforeDeniedWrite = memory.readProjectMemory();
-  let deniedRead = false;
-  let deniedWrite = false;
-  try {
-    await toolsB.project_memory_read.execute({}, { ...toolContext, agent: { threadId: "dm:agent-b:0" } });
-  } catch {
-    deniedRead = true;
-  }
-  try {
-    await toolsB.project_memory_add.execute(
-      { note: "Unauthorized entry", section: "Research" },
-      { ...toolContext, agent: { threadId: "dm:agent-b:0" } },
-    );
-  } catch {
-    deniedWrite = true;
-  }
+  // Unauthorized tools must not be exposed to the model at all. The execute-
+  // time guard remains defence in depth for stale sessions or direct calls.
+  const deniedRead = !Object.hasOwn(toolsB, "project_memory_read");
+  const deniedWrite = !Object.hasOwn(toolsB, "project_memory_add");
 
   const unchangedAfterDeniedWrite = memory.readProjectMemory() === beforeDeniedWrite;
   const edited = memory.readProjectMemory().replace("Current baseline", "Updated baseline");
@@ -163,6 +152,7 @@ async function writeState() {
     authorizedRead: readable.text.includes("Current baseline"),
     deniedRead,
     deniedWrite,
+    unauthorizedToolsNotRegistered: deniedRead && deniedWrite,
     unauthorizedWriteLeftFileUnchanged: deniedWrite && unchangedAfterDeniedWrite &&
       finalMemory.includes("Updated baseline") &&
       !finalMemory.includes("Unauthorized entry"),

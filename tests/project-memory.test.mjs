@@ -25,6 +25,7 @@ test("keeps private memory isolated and persists authorized, attributed project 
       authorizedRead: true,
       deniedRead: true,
       deniedWrite: true,
+      unauthorizedToolsNotRegistered: true,
       unauthorizedWriteLeftFileUnchanged: true,
       markdownEditPreservedProvenance: true,
       secretsRedacted: true,

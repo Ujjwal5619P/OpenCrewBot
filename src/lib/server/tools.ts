@@ -151,16 +151,25 @@ export interface BotToolset {
   capabilities: string[];
 }
 
-export function buildTools(bot: Bot, connectorToolNames: ReadonlySet<string> = new Set()): BotToolset {
+export function buildTools(
+  bot: Bot,
+  connectorToolNames: ReadonlySet<string> = new Set(),
+  sharedProjectMemoryAuthorized = false,
+): BotToolset {
   const tools: ToolsInput = {};
   const instructions: string[] = [];
   const capabilities: string[] = [];
   Object.assign(tools, collaborationTools(bot.id));
-  Object.assign(tools, projectMemoryTools(bot.id));
   capabilities.push(
     "In group rooms, delegate bounded tasks to room members with delegate_room_work and share research or ask/answer teammates with room_collaborate. These tools are unavailable in direct-message contexts.",
-    "If explicitly authorized, use project_memory_read and project_memory_add to access shared project notes. Your own MEMORY.md remains private; agent-added shared notes are marked unverified.",
   );
+  // Do not expose shared project-memory tools to the model unless the user has
+  // explicitly granted this exact bot access. The execute-time guard remains
+  // in place as defence in depth.
+  if (sharedProjectMemoryAuthorized) {
+    Object.assign(tools, projectMemoryTools(bot.id));
+    capabilities.push("You are explicitly authorized to use project_memory_read and project_memory_add for shared project notes. Your own MEMORY.md remains private; agent-added shared notes are marked unverified.");
+  }
 
   if (bot.tools.webSearch && keys.tavily()) {
     Object.assign(tools, webTools());
@@ -190,8 +199,8 @@ export function buildTools(bot: Bot, connectorToolNames: ReadonlySet<string> = n
     tools[CODE_MODE_TOOL] = codeMode.tool;
     instructions.push(codeMode.instructions);
     capabilities.push(
-      `Run TypeScript with ${CODE_MODE_TOOL} when a question needs several tool calls, filtering, or exact arithmetic; call the other tools from inside it with Promise.all.`,
-    );
+  `Run TypeScript with ${CODE_MODE_TOOL} when a question needs several tool calls, filtering, or exact arithmetic; call available tools from inside it with Promise.all. IMPORTANT: Never call COMPOSIO_* tools from inside ${CODE_MODE_TOOL}. For connected apps such as GitHub, call COMPOSIO_SEARCH_TOOLS directly, then call COMPOSIO_MULTI_EXECUTE_TOOL directly with the discovered action. These calls must be made directly by the agent so approval checks can work.`,
+);
   }
   if (bot.tools.browser && keys.browserbase()) {
     capabilities.push(
@@ -206,7 +215,7 @@ export function buildTools(bot: Bot, connectorToolNames: ReadonlySet<string> = n
 /** Which approval policy a tool falls under. Read and memory tools never ask;
  * acting in the browser does, unless the bot has Full access. */
 export function toolCategory(toolName: string): ToolCategory | null {
-  if (["skill_discover", "skill_load"].includes(toolName)) return "read";
+  if (["skill_discover", "skill_load", "github_list_repositories"].includes(toolName)) return "read";
   if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
   if (toolName === "project_memory_read") return "read";
   if (toolName === "project_memory_add") return "edit";
@@ -259,6 +268,8 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
     return { label: `${mcpServerNames.get(id) ?? "MCP"}: ${rest.join(" ")}` };
   }
   switch (name) {
+    case "github_list_repositories":
+      return { label: "Listed GitHub repositories" };
     case "web_search":
       return { label: "Searched the web", detail: String(a.query ?? "") };
     case "read_page": {
