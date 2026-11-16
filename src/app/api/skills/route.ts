@@ -1,8 +1,8 @@
 import { connection } from "next/server";
 import { handle } from "@/lib/server/http";
-import { listSkillSummaries } from "@/lib/server/skills/catalog";
+import { listSkills } from "@/lib/server/skills";
 
 export async function GET() {
   await connection();
-  return handle(async () => ({ skills: listSkillSummaries() }));
+  return handle(async () => ({ skills: listSkills() }));
 }

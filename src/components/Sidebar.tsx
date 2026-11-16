@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { MoreHorizontal, PanelLeft, Pin, Plug, Plus, Search, Settings, Sparkles, X } from "lucide-react";
+import { CalendarClock, MoreHorizontal, PanelLeft, Pin, Plug, Plus, Search, Settings, ShieldAlert, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
 import { timeLabel } from "@/lib/client/format";
@@ -62,6 +62,7 @@ export function Menu({
 function RowItem({ row }: { row: Row }) {
   const { state, open, setInspector, toast } = useApp();
   const [menu, setMenu] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const conversationId = `${row.kind === "room" ? "room" : "dm"}:${row.id}`;
   const active = state.active === conversationId;
   const summary = row.summary;
@@ -92,10 +93,10 @@ function RowItem({ row }: { row: Row }) {
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete ${name}? ${row.kind === "bot" ? "Its chat and MEMORY.md are deleted too." : "The room's chat is deleted too."}`)) return;
     try {
       if (row.kind === "room") await api.deleteRoom(row.id);
       else await api.deleteBot(row.id);
+      setConfirmRemove(false);
       if (active) open(null);
     } catch (error) {
       toast(error instanceof Error ? error.message : "Couldn't delete.");
@@ -112,13 +113,13 @@ function RowItem({ row }: { row: Row }) {
       ? [
           { label: pinned ? "Unpin" : "Pin to top", onClick: togglePin },
           { label: "Room settings", onClick: () => openWith("settings") },
-          { label: "Delete room", onClick: remove, danger: true },
+          { label: "Delete room", onClick: () => setConfirmRemove(true), danger: true },
         ]
       : [
           { label: pinned ? "Unpin" : "Pin to top", onClick: togglePin },
           { label: "Edit profile", onClick: () => openWith("details") },
           { label: "Memory", onClick: () => openWith("memory") },
-          { label: "Delete bot", onClick: remove, danger: true },
+          { label: "Delete bot", onClick: () => setConfirmRemove(true), danger: true },
         ];
 
   return (
@@ -160,6 +161,19 @@ function RowItem({ row }: { row: Row }) {
           </span>
         </span>
       </button>
+      {confirmRemove && (
+        <div className="mt-1 flex items-center justify-between gap-2 rounded-xl bg-danger-soft px-3 py-2 text-[12px]">
+          <span className="text-danger">Delete {name}?</span>
+          <span className="flex gap-1.5">
+            <button onClick={() => setConfirmRemove(false)} className="rounded-lg bg-raised px-2 py-1 text-mute hover:text-ink">
+              Cancel
+            </button>
+            <button onClick={() => void remove()} className="rounded-lg bg-danger px-2 py-1 font-medium text-white">
+              Delete
+            </button>
+          </span>
+        </div>
+      )}
       <IconButton
         label={`More for ${name}`}
         onClick={() => setMenu((m) => !m)}
@@ -172,31 +186,64 @@ function RowItem({ row }: { row: Row }) {
   );
 }
 
-/** Bottom bar: who powers the models, and the way to settings and keys. */
+/** Bottom bar: who powers the models, and the way to approvals, schedules, connections, and settings. */
 function SidebarFooter() {
   const { state, setPanel } = useApp();
   const status = state.status;
-  const missing = status ? Object.values(status.keys).filter((on) => !on).length : 0;
-  const settingsHint = status?.mock ? "Settings · mock mode until NEBIUS_API_KEY is set" : missing ? `Settings · ${missing} key${missing === 1 ? "" : "s"} not set` : "Settings";
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .approvals()
+      .then((d) => {
+        if (!cancelled) setPendingCount(d.approvals.length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [state.approvalsVersion, state.loaded]);
+
+  const settingsHint = status?.ollama?.available
+    ? `Settings · Local Ollama connected (${status.ollama.defaultModel})`
+    : status?.mock
+      ? "Settings · Local Ollama unreachable (simulated demo mode)"
+      : "Settings";
   return (
     <div className="flex items-center gap-1 border-t border-line px-3 py-3">
       <a
         href="https://tokenfactory.nebius.com"
         target="_blank"
         rel="noopener noreferrer"
-        className="flex h-10 min-w-0 shrink items-center gap-2 rounded-xl px-3 ring-1 ring-line transition-colors hover:bg-hover hover:ring-line-strong"
+        className="flex h-10 min-w-0 shrink items-center gap-2 rounded-xl px-2.5 ring-1 ring-line transition-colors hover:bg-hover hover:ring-line-strong"
         title="Models by Nebius Token Factory"
       >
         <span className="shrink-0 text-[10px] font-semibold tracking-[0.08em] text-faint uppercase">Powered by</span>
-        <NebiusLogo height={14} className="shrink-0" />
+        <NebiusLogo height={13} className="shrink-0" />
       </a>
-      <IconButton label="Connections" onClick={() => setPanel({ kind: "connections" })} className="ml-auto">
+      <IconButton
+        label={`Approval Centre${pendingCount ? ` (${pendingCount} pending)` : ""}`}
+        onClick={() => setPanel({ kind: "approvals" })}
+        className="relative ml-auto"
+      >
+        <ShieldAlert size={18} />
+        {pendingCount > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warn px-1 text-[10px] font-bold text-black">
+            {pendingCount}
+          </span>
+        )}
+      </IconButton>
+      <IconButton label="Scheduled workflows" onClick={() => setPanel({ kind: "schedules" })}>
+        <CalendarClock size={18} />
+      </IconButton>
+      <IconButton label="Connections" onClick={() => setPanel({ kind: "connections" })}>
         <Plug size={18} />
       </IconButton>
       <IconButton label={settingsHint} onClick={() => setPanel({ kind: "settings" })} className="relative">
         <Settings size={18} />
-        {status && (status.mock || missing > 0) && (
-          <span className={clsx("absolute top-1.5 right-1.5 h-2 w-2 rounded-full ring-2 ring-side", status.mock ? "bg-warn" : "bg-faint")} />
+        {status && status.mock && (
+          <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-warn ring-2 ring-side" />
         )}
       </IconButton>
     </div>
@@ -256,7 +303,6 @@ export function Sidebar() {
               onClose={() => setNewMenu(false)}
               items={[
                 { label: "New bot", onClick: () => setPanel({ kind: "new-bot" }), icon: <Mascot color="#3b82f6" size={18} /> },
-                { label: "Create Agent with AI", onClick: () => setPanel({ kind: "new-agent-ai" }), icon: <Sparkles size={17} /> },
                 { label: "New room", onClick: () => setPanel({ kind: "new-room" }), icon: <RoomAvatar colors={["#22c55e", "#f59e0b"]} size={18} /> },
               ]}
             />
@@ -292,7 +338,12 @@ export function Sidebar() {
       )}
 
       <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
-        {!state.loaded && <p className="px-3 py-6 text-sm text-mute">Loading…</p>}
+        {!state.loaded && !state.bootstrapError && <p className="px-3 py-6 text-sm text-mute">Loading…</p>}
+        {!state.loaded && state.bootstrapError && (
+          <div className="px-3 py-6 text-sm text-danger">
+            <p>{state.bootstrapError}</p>
+          </div>
+        )}
         {rows.map((row) => (
           <RowItem key={`${row.kind}:${row.id}`} row={row} />
         ))}

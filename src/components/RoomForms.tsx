@@ -15,6 +15,7 @@ export function RoomForm({ room, onDone }: { room?: Room; onDone?: (room: Room) 
   );
   const [form, setForm] = useState<RoomInput>(initial);
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
   const set = <K extends keyof RoomInput>(k: K, v: RoomInput[K]) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -46,7 +47,7 @@ export function RoomForm({ room, onDone }: { room?: Room; onDone?: (room: Room) 
   };
 
   const remove = async () => {
-    if (!room || !window.confirm(`Delete ${room.name}? The room's chat is deleted too.`)) return;
+    if (!room) return;
     try {
       await api.deleteRoom(room.id);
       open(null);
@@ -107,7 +108,7 @@ export function RoomForm({ room, onDone }: { room?: Room; onDone?: (room: Room) 
             value={form.responder}
             onChange={(v) => set("responder", v)}
             options={[
-              { value: "auto", label: "Auto", hint: state.status?.keys.jev ? "Jev picks." : "Jev picks (needs key)." },
+              { value: "auto", label: "Auto", hint: state.status?.keys.jev ? "Jev picks." : "Not configured (falls back to lead)." },
               { value: "lead", label: "Lead", hint: "The lead answers." },
               { value: "everyone", label: "Everyone", hint: "Each bot answers." },
             ]}
@@ -128,9 +129,23 @@ export function RoomForm({ room, onDone }: { room?: Room; onDone?: (room: Room) 
 
         {room && (
           <div className="pt-2">
-            <Button variant="danger" size="sm" onClick={remove}>
-              Delete room
-            </Button>
+            {confirmDelete ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-danger-soft px-3.5 py-2.5 text-[12.5px] text-danger">
+                <span>Delete {room.name}? The room&apos;s chat will be deleted too.</span>
+                <span className="flex items-center gap-1.5">
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
+                    Cancel
+                  </Button>
+                  <Button variant="danger" size="sm" onClick={remove}>
+                    Confirm delete
+                  </Button>
+                </span>
+              </div>
+            ) : (
+              <Button variant="danger" size="sm" onClick={() => setConfirmDelete(true)}>
+                Delete room
+              </Button>
+            )}
           </div>
         )}
       </div>

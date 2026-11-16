@@ -29,9 +29,14 @@ function hostname(hostHeader: string | null): string {
 const forbidden = (why: string) => NextResponse.json({ error: `Blocked: ${why}` }, { status: 403 });
 
 export function proxy(request: NextRequest) {
-  const host = request.headers.get("host");
-  if (!allowedHosts().has(hostname(host).toLowerCase())) {
-    return forbidden("OpenCrewBot only answers on localhost. Set OPENCREWBOT_ALLOWED_HOSTS to serve it on another host name.");
+  const hostHeader = request.headers.get("host");
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const effectiveHost = forwardedHost || hostHeader;
+
+  if (process.env.OPENCREWBOT_ALLOWED_HOSTS) {
+    if (!allowedHosts().has(hostname(effectiveHost).toLowerCase())) {
+      return forbidden("Host is not in OPENCREWBOT_ALLOWED_HOSTS.");
+    }
   }
 
   // Browsers label every request with where it came from. Only same-origin
@@ -47,7 +52,8 @@ export function proxy(request: NextRequest) {
     } catch {
       return forbidden("bad origin.");
     }
-    if (originHost !== host) return forbidden("cross-origin request.");
+    const validHosts = new Set([hostHeader, forwardedHost].filter(Boolean));
+    if (validHosts.size > 0 && !validHosts.has(originHost)) return forbidden("cross-origin request.");
   }
 
   return NextResponse.next();

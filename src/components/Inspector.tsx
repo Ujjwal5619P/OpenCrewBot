@@ -1,15 +1,15 @@
 "use client";
 
+import clsx from "clsx";
 import { ExternalLink, Pencil, X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, CollaborationMessage, Execution, ModelSelection, Room } from "@/lib/shared/types";
+import type { Bot, Room } from "@/lib/shared/types";
 import { BotForm, MemoryEditor } from "./BotForms";
-import { SharedMemoryEditor } from "./SharedMemoryEditor";
 import { ModelPicker } from "./ModelPicker";
 import { RoomForm } from "./RoomForms";
 import { useApp, type InspectorTab } from "./OpenCrewBotApp";
-import { BotAvatar, Button, IconButton, Mascot, RoomAvatar, Tabs, Toggle } from "./ui";
+import { BotAvatar, Button, IconButton, Mascot, RoomAvatar, Tabs, Toggle, inputClass } from "./ui";
 import { useConnections } from "@/lib/client/use-connections";
 
 function BrowserView({ bot }: { bot: Bot }) {
@@ -125,14 +125,14 @@ function BotConnections({ bot }: { bot: Bot }) {
             <Toggle
               key={o.id}
               label={o.name}
-              hint={o.kind === "mcp" ? "MCP server" : "via Composio"}
+              hint={o.kind === "mcp" ? "MCP server" : o.kind === "github" ? "Environment token" : "via Composio"}
               checked={bot.connections.includes(o.id)}
               disabled={saving === o.id}
               onChange={(v) => toggle(o.id, v)}
             />
           ))}
           {stale.map((id) => (
-            <Toggle key={id} label={id.replace(/^composio:|^mcp:/, "")} hint="Not connected any more" checked disabled={saving === id} onChange={() => toggle(id, false)} />
+            <Toggle key={id} label={id.replace(/^composio:|^mcp:|^github:/, "")} hint="Not connected any more" checked disabled={saving === id} onChange={() => toggle(id, false)} />
           ))}
         </div>
       )}
@@ -148,12 +148,11 @@ function BotDetails({ bot }: { bot: Bot }) {
   const { state, toast } = useApp();
   const [editing, setEditing] = useState(false);
 
-  const selection = { providerId: bot.modelProvider ?? "nebius", model: bot.model };
-  const switchModel = async (next: ModelSelection) => {
-    if (next.model === selection.model && next.providerId === selection.providerId) return;
+  const switchModel = async (id: string) => {
+    if (id === bot.model) return;
     try {
-      await api.updateBot(bot.id, { model: next.model, modelProvider: next.providerId });
-      toast(`${bot.name} now uses ${state.models.find((m) => m.providerId === next.providerId && m.id === next.model)?.label ?? next.model}, from its next reply.`);
+      await api.updateBot(bot.id, { model: id });
+      toast(`${bot.name} now uses ${state.models.find((m) => m.id === id)?.label ?? id}, from its next reply.`);
     } catch (error) {
       toast(error instanceof Error ? error.message : "Couldn't switch the model.");
     }
@@ -182,16 +181,12 @@ function BotDetails({ bot }: { bot: Bot }) {
       </Card>
       <section>
         <h3 className="mb-1.5 px-1 text-[12.5px] font-medium text-faint">Default model</h3>
-        <ModelPicker value={selection} onChange={switchModel} />
-        {!state.models.some((model) => model.providerId === selection.providerId && model.id === selection.model && model.available) && (
-          <p className="mt-1.5 px-1 text-[12px] text-faint">
-            {bot.fallbackModel
-              ? "Primary model is unavailable; the configured fallback is selected before the turn starts."
-              : selection.providerId === "nebius" && !state.status?.keys.nebius
-                ? "Mock mode: replies use scripted responses until NEBIUS_API_KEY is set."
-                : "This model is unavailable and will not be selected for a real request."}
-          </p>
-        )}
+        <ModelPicker value={bot.model} onChange={switchModel} />
+        {state.status?.ollama?.available ? (
+          <p className="mt-1.5 px-1 text-[12px] text-faint">Local Ollama connected ({state.status.ollama.baseUrl}).</p>
+        ) : state.status?.mock ? (
+          <p className="mt-1.5 px-1 text-[12px] text-faint">Mock mode: start local Ollama (qwen2.5:3b) or optionally set NEBIUS_API_KEY.</p>
+        ) : null}
       </section>
       <Card title="Tools">
         {tools.length ? (
@@ -205,13 +200,13 @@ function BotDetails({ bot }: { bot: Bot }) {
         ) : (
           <p className="text-[13.5px] text-mute">No tools. It only chats.</p>
         )}
-        {bot.tools.browser && (
+        {(bot.tools.browser || bot.approval === "restricted") && (
           <p className="mt-2.5 text-[12.5px] text-mute">
             {bot.approval === "full"
-              ? "Full Access: configured browser tools run without individual prompts."
-              : bot.approval === "controlled"
-                ? "Controlled Access: listed safe actions may run without prompting; sensitive actions still ask."
-                : "Ask First: browser actions wait for your approval."}
+              ? "Full access: acts without asking."
+              : bot.approval === "restricted"
+                ? "Read-only: blocks memory writes, browser actions, and MCP actions."
+                : "Ask first: prompts before browser or MCP actions."}
           </p>
         )}
       </Card>
@@ -240,7 +235,6 @@ function BotInspector({ bot, tab, setTab }: { bot: Bot; tab: InspectorTab; setTa
             tabs={[
               { value: "details", label: "Details" },
               { value: "memory", label: "Memory" },
-              { value: "shared-memory", label: "Shared" },
               { value: "browser", label: "Browser" },
             ]}
           />
@@ -249,200 +243,87 @@ function BotInspector({ bot, tab, setTab }: { bot: Bot; tab: InspectorTab; setTa
       <div className="px-5 pb-6">
         {current === "details" && <BotDetails key={bot.id} bot={bot} />}
         {current === "memory" && <MemoryEditor bot={bot} />}
-        {current === "shared-memory" && <SharedMemoryEditor />}
         {current === "browser" && <BrowserView bot={bot} />}
       </div>
     </>
   );
 }
 
-function TaskResponseControls({ task }: { task: Execution["tasks"][number] }) {
-  const { toast } = useApp();
-  const [busy, setBusy] = useState(false);
-  const [answer, setAnswer] = useState("");
+function RoomMemoryEditor({ room }: { room: Room }) {
+  const { state, toast } = useApp();
+  const [content, setContent] = useState<string | null>(null);
+  const [saved, setSaved] = useState("");
+  const [meta, setMeta] = useState<{ path: string; limit: { lines: number; bytes: number } } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const dirty = content !== null && content !== saved;
+  const version = state.roomMemoryVersion[room.id] ?? 0;
 
-  const approve = async (decision: boolean) => {
-    if (!task.approvalRequest) return;
-    setBusy(true);
-    try {
-      await api.approve(task.approvalRequest.conversationId, task.assignedBotId, task.approvalRequest.toolCallId, decision);
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "Couldn't send the approval.");
-      setBusy(false);
-    }
-  };
-
-  const respond = async (value: string) => {
-    if (!task.inputRequest || !value.trim()) return;
-    setBusy(true);
-    try {
-      await api.answer(task.inputRequest.conversationId, task.assignedBotId, task.inputRequest.toolCallId, value);
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "Couldn't send the answer.");
-      setBusy(false);
-    }
-  };
-
-  if (task.status === "awaiting_approval" && task.approvalRequest) {
-    return (
-      <div className="mt-2 flex items-center gap-2 rounded-xl bg-warn-soft px-2.5 py-2">
-        <span className="mr-auto text-[11.5px] text-warn">Agent approval required</span>
-        <button type="button" disabled={busy} onClick={() => void approve(false)} className="text-[11.5px] text-mute disabled:opacity-50">Deny</button>
-        <button type="button" disabled={busy} onClick={() => void approve(true)} className="rounded-full bg-accent px-2.5 py-1 text-[11.5px] text-accent-ink disabled:opacity-50">Allow once</button>
-      </div>
-    );
-  }
-  if (task.status === "awaiting_input" && task.inputRequest) {
-    return (
-      <div className="mt-2 space-y-2 rounded-xl bg-accent-soft px-2.5 py-2.5">
-        <p className="text-[11.5px]">{task.inputRequest.question}</p>
-        {task.inputRequest.options.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {task.inputRequest.options.map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                title={option.description}
-                disabled={busy}
-                onClick={() => void respond(option.label)}
-                className="rounded-full bg-raised-2 px-2.5 py-1 text-[11.5px] disabled:opacity-50"
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        )}
-        <form
-          className="flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void respond(answer);
-          }}
-        >
-          <input
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            aria-label="Answer delegated agent"
-            placeholder="Type an answer"
-            className="min-w-0 flex-1 rounded-full bg-raised-2 px-3 py-1.5 text-[11.5px] outline-none"
-            disabled={busy}
-          />
-          <button type="submit" disabled={busy || !answer.trim()} className="text-[11.5px] text-[#8db4ff] disabled:opacity-50">Answer</button>
-        </form>
-      </div>
-    );
-  }
-  return null;
-}
-
-function RoomWork({ room, members }: { room: Room; members: Bot[] }) {
-  const { toast } = useApp();
-  const [executions, setExecutions] = useState<Execution[]>([]);
-  const [messages, setMessages] = useState<CollaborationMessage[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState<string | null>(null);
-  const names = new Map(members.map((member) => [member.id, member.name]));
+  const dirtyRef = useRef(dirty);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
   useEffect(() => {
-    let active = true;
-    const refresh = async () => {
-      try {
-        const result = await api.roomCollaboration(room.id);
-        if (active) {
-          setExecutions(result.executions);
-          setMessages(result.messages);
-          setError(null);
-        }
-      } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : "Couldn't load room work.");
-      }
-    };
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), 2500);
+    if (dirtyRef.current) return;
+    let cancelled = false;
+    api
+      .getRoomMemory(room.id)
+      .then((data) => {
+        if (cancelled) return;
+        setSaved(data.content);
+        setContent(data.content);
+        setMeta({ path: data.path, limit: data.limit });
+      })
+      .catch((error) => toast(error instanceof Error ? error.message : "Couldn't load room memory."));
     return () => {
-      active = false;
-      window.clearInterval(interval);
+      cancelled = true;
     };
-  }, [room.id]);
+  }, [room.id, version, toast]);
 
-  const cancel = async (executionId: string) => {
-    setCancelling(executionId);
+  const save = async () => {
+    if (content === null) return;
+    setSaving(true);
     try {
-      await api.cancelExecution(executionId);
-      const result = await api.roomCollaboration(room.id);
-      setExecutions(result.executions);
-      setMessages(result.messages);
-    } catch (reason) {
-      toast(reason instanceof Error ? reason.message : "Couldn't cancel delegated work.");
+      const data = await api.saveRoomMemory(room.id, content);
+      setSaved(data.content);
+      setContent(data.content);
+      toast("Saved shared room memory.");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Couldn't save room memory.");
     } finally {
-      setCancelling(null);
+      setSaving(false);
     }
   };
 
+  const lines = content ? content.trimEnd().split("\n").length : 0;
   return (
-    <div className="space-y-4">
-      {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-[12.5px] text-danger">{error}</p>}
-      {messages.length > 0 && (
-        <section className="space-y-2">
-          <h3 className="px-1 text-[12.5px] font-medium text-faint">Room exchanges</h3>
-          {messages.slice(-20).map((message) => (
-            <article key={message.id} className="rounded-xl bg-raised px-3 py-2.5">
-              <p className="text-[11.5px] font-medium text-mute">
-                {message.type.replace(/_/g, " ")} · {names.get(message.authorBotId) ?? "Former member"}
-                {message.recipientBotId ? ` to ${names.get(message.recipientBotId) ?? "Former member"}` : ""}
-              </p>
-              <p className="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed">{message.content}</p>
-            </article>
-          ))}
-        </section>
-      )}
-      {executions.length === 0 && !error && <p className="text-[13.5px] text-mute">No delegated work yet.</p>}
-      {executions.map((execution) => (
-        <section key={execution.id} className="space-y-2.5 rounded-2xl bg-raised p-3.5">
-          <div className="flex items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <h3 className="text-[13.5px] font-medium">{execution.summary}</h3>
-              <p className="mt-1 text-[12px] text-mute">
-                {execution.status} · {execution.plannerLabel} · depth {execution.collaboration?.depth ?? 1}
-              </p>
-            </div>
-            {(execution.status === "pending" || execution.status === "running") && (
-              <button
-                type="button"
-                disabled={cancelling === execution.id}
-                onClick={() => void cancel(execution.id)}
-                className="shrink-0 rounded-full bg-raised-2 px-2.5 py-1 text-[11.5px] text-mute hover:text-ink disabled:opacity-50"
-              >
-                {cancelling === execution.id ? "Stopping…" : "Stop"}
-              </button>
-            )}
-          </div>
-          <ol className="space-y-2">
-            {execution.tasks.map((task) => (
-              <li key={task.id} className="rounded-xl bg-raised-2 px-3 py-2.5">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-[12.5px] font-medium">{task.title}</p>
-                  <span className="shrink-0 text-[11px] text-mute">{task.status.replace(/_/g, " ")}</span>
-                </div>
-                <p className="mt-1 text-[11.5px] text-faint">Working agent: {names.get(task.assignedBotId) ?? "Deleted bot"}</p>
-                {task.collaboration?.verificationOfTaskId && (
-                  <p className="mt-1 text-[11.5px] text-mute">
-                    Review of {task.collaboration.verificationOfTaskId}: {task.collaboration.verificationStatus ?? "pending"}
-                  </p>
-                )}
-                {task.error && <p className="mt-1.5 text-[11.5px] text-danger">{task.error}</p>}
-                <TaskResponseControls task={task} />
-                {task.output && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-[11.5px] text-[#8db4ff]">Intermediate output</summary>
-                    <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap text-[11.5px] leading-relaxed text-mute">{task.output}</pre>
-                  </details>
-                )}
-              </li>
-            ))}
-          </ol>
-        </section>
-      ))}
+    <div className="flex flex-col gap-3">
+      <p className="text-center text-[13px] leading-relaxed text-mute">
+        Shared decisions here are loaded for every member of {room.name} when replying in this room.
+      </p>
+      <textarea
+        value={content ?? ""}
+        onChange={(e) => setContent(e.target.value)}
+        disabled={content === null}
+        spellCheck={false}
+        aria-label="Room MEMORY.md"
+        className={clsx(inputClass, "h-[50vh] min-h-[240px] resize-y rounded-2xl p-4 font-mono text-[12.5px] leading-relaxed")}
+      />
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[12px] text-faint" title={meta?.path}>
+          Room MEMORY.md · {lines} {lines === 1 ? "line" : "lines"}
+        </span>
+        <span className="flex shrink-0 gap-2">
+          {dirty && (
+            <Button size="sm" variant="ghost" onClick={() => setContent(saved)}>
+              Revert
+            </Button>
+          )}
+          <Button size="sm" variant="primary" disabled={!dirty || saving} onClick={save}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </span>
+      </div>
     </div>
   );
 }
@@ -451,7 +332,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
   const { state, open } = useApp();
   const members = room.memberIds.map((id) => state.bots.find((b) => b.id === id)).filter((b): b is Bot => Boolean(b));
   const running = state.summaries[`room:${room.id}`]?.running ?? [];
-  const current = tab === "settings" || tab === "work" || tab === "shared-memory" ? tab : "members";
+  const current = tab === "settings" || tab === "memory" ? tab : "members";
   return (
     <>
       <div className="flex flex-col items-center px-6 pt-2 pb-5 text-center">
@@ -464,8 +345,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
             onChange={setTab}
             tabs={[
               { value: "members", label: "Members" },
-              { value: "work", label: "Work" },
-              { value: "shared-memory", label: "Shared" },
+              { value: "memory", label: "Memory" },
               { value: "settings", label: "Settings" },
             ]}
           />
@@ -495,8 +375,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
             {members.length === 0 && <p className="px-3 py-6 text-center text-sm text-mute">No members yet. Add some in Settings.</p>}
           </ul>
         )}
-        {current === "work" && <RoomWork room={room} members={members} />}
-        {current === "shared-memory" && <SharedMemoryEditor />}
+        {current === "memory" && <RoomMemoryEditor room={room} />}
         {current === "settings" && <RoomForm key={JSON.stringify(room)} room={room} />}
       </div>
     </>

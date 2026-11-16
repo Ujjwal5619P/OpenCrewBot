@@ -1,8 +1,11 @@
 // Group rooms: decide who answers, give each bot the part of the room it
 // hasn't seen, and let a bot hand off to a teammate by @mentioning them.
 import type { Bot, ChatMessage, Room, RouteNote } from "@/lib/shared/types";
-import { listBots, listCollaborationMessages, listMessages } from "./db";
+import { getRoom, listBots, listMessages, saveDelegationRun } from "./db";
+import { executeDelegationPlan, validateDelegationPlan, type DelegationExecutionReport } from "./delegation";
+import { InputError } from "./errors";
 import { pickResponders } from "./jev";
+import { roomMemoryForPrompt } from "./memory-files";
 import { runTurn, stopEpochOf } from "./runtime";
 
 /** How many bot-to-bot @mention hops one message from the person can start. */
@@ -46,28 +49,71 @@ function catchUp(history: ChatMessage[], bot: Bot, bots: Map<string, Bot>): stri
     .map((m) => `${authorName(m, bots)}: ${messageText(m) || "(no text)"}`);
 }
 
-function roomPrompt(
-  room: Room,
-  bot: Bot,
-  members: Bot[],
-  lines: string[],
-  collaborationLines: string[],
-  handoff: boolean,
-): string {
+function roomPrompt(room: Room, bot: Bot, members: Bot[], lines: string[], handoff: boolean): string {
   const roster = members
-    .map((b) => `- ${b.name} (ID: ${b.id}, @${b.handle})${b.title ? `, ${b.title}` : ""}${b.id === bot.id ? " (you)" : ""}`)
+    .map((b) => `- ${b.name} (@${b.handle}, id: ${b.id})${b.title ? `, role: ${b.title}` : ""}${b.id === bot.id ? " (you)" : ""}`)
     .join("\n");
+  const { text: roomMem, truncated } = roomMemoryForPrompt(room.id);
+  const sharedSection = [
+    `Shared room memory (${room.name} MEMORY.md):`,
+    roomMem || "(empty so far — save shared decisions here with room_memory_add)",
+    truncated ? "(Room MEMORY.md is truncated; use room_memory_edit to tidy.)" : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   return [
     `[Group room "${room.name}"${room.topic ? `, topic: ${room.topic}` : ""}]`,
-    `Members:\n${roster}`,
+    `Valid members in THIS room ONLY:\n${roster}`,
+    sharedSection,
     `New in the room since your last message:\n${lines.join("\n") || "(nothing new)"}`,
-    `Collaboration messages:\n${collaborationLines.join("\n") || "(none)"}`,
     "---",
     handoff
       ? `A teammate @mentioned you. Do the part they asked of you, as ${bot.name}.`
       : `Reply to the latest message as ${bot.name}.`,
-    "Add only your part; don't repeat what teammates already said. Delegate structured work with delegate_room_work; use room_collaborate to share research or ask and answer members. Delegation is bounded, and every assigned bot still follows its own approval permissions.",
+    [
+      "Rules for working in this room:",
+      "- Add only your part; don't repeat what teammates already said.",
+      "- NEVER invent fake team members (like Jenny or DevTeam1) or assign tasks to bots not listed in Valid members above.",
+      "- For multi-step parallel/dependent work, call `delegate_tasks` with `{ tasks: [{ title, instructions, assignee, dependsOn? }] }` using ONLY exact `@handle` or `id` values from Valid members above (`id` is optional and auto-generated if omitted).",
+      "- If `delegate_tasks` fails, report the failure honestly instead of claiming success.",
+      "- Use `room_memory_add` / `room_memory_edit` for shared decisions everyone in this room should remember.",
+    ].join("\n"),
   ].join("\n\n");
+}
+
+/** Validate and execute a structured delegation plan inside a specific room. */
+export async function delegateInRoom(
+  roomId: string,
+  requestedBy: Bot | null,
+  rawInput: unknown,
+): Promise<DelegationExecutionReport> {
+  const room = await getRoom(roomId);
+  if (!room) throw new InputError("That room doesn't exist.");
+
+  const allBots = await listBots();
+  const byId = new Map(allBots.map((b) => [b.id, b]));
+  const members = room.memberIds.map((id) => byId.get(id)).filter((b): b is Bot => Boolean(b));
+  if (!members.length) throw new InputError(`Room "${room.name}" has no members to delegate to.`);
+
+  if (requestedBy && !room.memberIds.includes(requestedBy.id)) {
+    throw new InputError(`${requestedBy.name} is not a member of room "${room.name}".`);
+  }
+
+  const tasks = validateDelegationPlan(rawInput, room, members, allBots);
+  const conversationId = roomConversationId(room.id);
+  const epoch = stopEpochOf(conversationId);
+  const lead = requestedBy ?? members.find((b) => b.id === room.leadId) ?? members[0];
+
+  return executeDelegationPlan({
+    room,
+    conversationId,
+    tasks,
+    requestedBy: lead,
+    runWorkerTurn: runTurn,
+    isStopped: () => stopEpochOf(conversationId) !== epoch,
+    onPersist: saveDelegationRun,
+  });
 }
 
 async function decideResponders(room: Room, members: Bot[], text: string, history: ChatMessage[], bots: Map<string, Bot>) {
@@ -102,24 +148,26 @@ export async function runRoom(room: Room, userMessage: ChatMessage): Promise<voi
   const history = await listMessages(conversationId, 60);
   const { bots: responders, route } = await decideResponders(room, members, messageText(userMessage), history, bots);
 
+  const visited = new Set<string>();
   const queue: Array<{ bot: Bot; route: RouteNote; depth: number }> = responders.map((bot) => ({ bot, route, depth: 0 }));
   while (queue.length && stopEpochOf(conversationId) === epoch) {
     const { bot, route: note, depth } = queue.shift()!;
+    visited.add(bot.id);
     const transcript = await listMessages(conversationId, 60);
-    const collaborationLines = (await listCollaborationMessages(room.id, 30)).slice(-20).map((message) => {
-      const author = bots.get(message.authorBotId)?.name ?? "Former member";
-      const recipient = message.recipientBotId ? ` to ${bots.get(message.recipientBotId)?.name ?? message.recipientBotId}` : "";
-      return `[${message.type}${recipient}; messageId=${message.id}] ${author}: ${message.content.slice(0, 1200)}`;
-    });
     const reply = await runTurn({
       bot,
       conversationId,
-      content: roomPrompt(room, bot, members, catchUp(transcript, bot, bots), collaborationLines, note.by === "handoff"),
+      content: roomPrompt(room, bot, members, catchUp(transcript, bot, bots), note.by === "handoff"),
       route: note,
     });
     if (!reply || reply.status !== "done" || depth >= MAX_HANDOFF_DEPTH) continue;
+    // If the responder used structured `delegate_tasks`, members were already executed (or failed cleanly);
+    // do not duplicate-trigger `@mention` handoffs from its summary text.
+    const usedStructuredDelegation = reply.parts.some((p) => p.kind === "tool" && p.name === "delegate_tasks");
+    if (usedStructuredDelegation) continue;
+
     for (const next of mentionsIn(messageText(reply), members)) {
-      if (next.id === bot.id || queue.some((q) => q.bot.id === next.id)) continue;
+      if (next.id === bot.id || visited.has(next.id) || queue.some((q) => q.bot.id === next.id)) continue;
       queue.push({ bot: next, route: { by: "handoff" }, depth: depth + 1 });
     }
   }

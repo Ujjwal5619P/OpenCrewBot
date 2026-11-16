@@ -9,16 +9,24 @@ import { Sidebar } from "./Sidebar";
 import { ChatView } from "./ChatView";
 import { Inspector } from "./Inspector";
 import { NewBotDrawer } from "./BotForms";
-import { AgentCreator } from "./AgentCreator";
 import { NewRoomDrawer } from "./RoomForms";
 import { SettingsPanel } from "./SettingsPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
+import { SchedulesPanel } from "./SchedulesPanel";
+import { ApprovalsPanel } from "./ApprovalsPanel";
 
 /** Modal sheets. Editing an existing bot or room happens in the inspector instead. */
-export type Panel = { kind: "new-bot" } | { kind: "new-agent-ai" } | { kind: "new-room" } | { kind: "settings" } | { kind: "connections" } | null;
+export type Panel =
+  | { kind: "new-bot" }
+  | { kind: "new-room" }
+  | { kind: "settings" }
+  | { kind: "connections" }
+  | { kind: "schedules" }
+  | { kind: "approvals" }
+  | null;
 
 /** Bots use details/memory/browser; rooms use members/settings. */
-export type InspectorTab = "details" | "memory" | "shared-memory" | "browser" | "members" | "work" | "settings";
+export type InspectorTab = "details" | "memory" | "browser" | "members" | "settings";
 export interface InspectorState {
   open: boolean;
   tab: InspectorTab;
@@ -153,7 +161,9 @@ export function OpenCrewBotApp() {
           else if (room) open(`room:${room.id}`);
         }
       } catch (error) {
-        toast(error instanceof Error ? error.message : "Couldn't reach the server.");
+        const msg = error instanceof Error ? error.message : "Couldn't reach the server.";
+        dispatch({ type: "bootstrap-error", error: msg });
+        toast(msg);
       }
     })();
   }, [open, toast]);
@@ -173,7 +183,12 @@ export function OpenCrewBotApp() {
       dropped = true;
     };
     source.onmessage = (e) => {
-      const event = JSON.parse(e.data) as ServerEvent;
+      let event: ServerEvent;
+      try {
+        event = JSON.parse(e.data) as ServerEvent;
+      } catch {
+        return;
+      }
       dispatch({ type: "event", event });
       if (event.type === "bots-changed" || event.type === "rooms-changed") {
         window.clearTimeout(refetch);
@@ -224,10 +239,11 @@ export function OpenCrewBotApp() {
         )}
       </div>
       {panel?.kind === "new-bot" && <NewBotDrawer onClose={() => setPanel(null)} />}
-      {panel?.kind === "new-agent-ai" && <AgentCreator onClose={() => setPanel(null)} />}
       {panel?.kind === "new-room" && <NewRoomDrawer onClose={() => setPanel(null)} />}
       {panel?.kind === "settings" && <SettingsPanel onClose={() => setPanel(null)} />}
       {panel?.kind === "connections" && <ConnectionsPanel onClose={() => setPanel(null)} />}
+      {panel?.kind === "schedules" && <SchedulesPanel onClose={() => setPanel(null)} />}
+      {panel?.kind === "approvals" && <ApprovalsPanel onClose={() => setPanel(null)} />}
       {toastText && (
         <div
           role="status"

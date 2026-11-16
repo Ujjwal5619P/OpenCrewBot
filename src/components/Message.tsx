@@ -36,7 +36,7 @@ type QuestionPart = Extract<Part, { kind: "question" }>;
 function ToolIcon({ name }: { name: string }) {
   const props = { size: 14, className: "shrink-0 text-mute", "aria-hidden": true } as const;
   if (["web_search", "read_page", "crawl_site"].includes(name)) return <Globe {...props} />;
-  if (name.startsWith("memory_") || name.startsWith("project_memory_")) return <NotebookPen {...props} />;
+  if (name.startsWith("memory_")) return <NotebookPen {...props} />;
   if (name.startsWith("browser_")) return <MousePointerClick {...props} />;
   return <Code2 {...props} />;
 }
@@ -110,10 +110,7 @@ function ToolChip({ message, part }: { message: ChatMessage; part: ToolPart }) {
           {part.status === "running" && <Loader2 size={14} className="animate-spin text-mute" aria-label="Running" />}
           {part.status === "done" && <Check size={14} className="text-ok" aria-label="Done" />}
           {part.status === "error" && <X size={14} className="text-danger" aria-label="Failed" />}
-          {part.status === "denied" && <span className="text-[12px] text-faint">Rejected</span>}
-          {part.status === "outcome_unknown" && (
-            <span className="text-[12px] text-warn" aria-label="Outcome unknown; reconcile before retrying">Outcome unknown</span>
-          )}
+          {part.status === "denied" && <span className="text-[12px] text-faint">Skipped</span>}
           {expandable && <ChevronRight size={14} className={clsx("text-faint transition-transform", open && "rotate-90")} aria-hidden />}
         </span>
       </button>
@@ -323,26 +320,20 @@ export function MessageItem({ message, bot, showAuthor }: { message: ChatMessage
             <span className="typing-dot h-1.5 w-1.5 rounded-full bg-mute" />
           </span>
         )}
+        {message.model === "mock" && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-warn-soft px-2.5 py-0.5 text-[11.5px] font-medium text-warn">
+            Simulated · Local Ollama unreachable
+          </span>
+        )}
         {message.error && <p className="rounded-2xl bg-danger-soft px-4 py-2.5 text-[13.5px] text-danger">{message.error}</p>}
         {message.status === "stopped" && !message.error && <p className="px-2 text-[13px] text-faint">Stopped.</p>}
         {uniqueSources.length > 0 && !streaming && <SourceList sources={uniqueSources} />}
       </div>
       <div className="mt-1 flex h-4 flex-wrap gap-x-2 pl-2 text-[11.5px] text-faint opacity-0 transition-opacity group-hover:opacity-100">
         <span>{timeLabel(message.createdAt)}</span>
-        {message.usage && !streaming && (
-          <span title={`${message.usage.provider} · ${message.usage.model}${message.usage.simulated ? " · simulated" : ""}`}>
-            {message.usage.simulated ? "simulated" : message.usage.provider} · {message.usage.model.split("/").pop()}
-          </span>
-        )}
-        {message.usage?.fallbackFrom && (
-          <span title={`Fallback selected before the turn: ${message.usage.fallbackFrom.providerId} · ${message.usage.fallbackFrom.model}`}>
-            fallback used
-          </span>
-        )}
-        {message.usage && (message.usage.input !== null || message.usage.output !== null) && (
-          <span title={`${message.usage.input ?? "unknown"} in · ${message.usage.output ?? "unknown"} out`}>
-            {formatTokens((message.usage.input ?? 0) + (message.usage.output ?? 0))} tokens
-          </span>
+        {message.model && !streaming && <span>{message.model === "mock" ? "simulated (mock)" : message.model.split("/").pop()}</span>}
+        {message.usage && (message.usage.input > 0 || message.usage.output > 0) && (
+          <span title={`${message.usage.input} in · ${message.usage.output} out`}>{formatTokens(message.usage.input + message.usage.output)} tokens</span>
         )}
         {cost && <span>{cost}</span>}
       </div>

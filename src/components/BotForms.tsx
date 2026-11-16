@@ -4,23 +4,12 @@ import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, BotInput, ModelSelection, ModelTaskType, SkillSummary } from "@/lib/shared/types";
+import type { Bot, BotInput } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Drawer, Field, Mascot, Segmented, Toggle, inputClass } from "./ui";
-import { useConnections } from "@/lib/client/use-connections";
 
 export const BOT_COLORS = ["#3b82f6", "#f59e0b", "#ec4899", "#22c55e", "#8b5cf6", "#14b8a6", "#ef4444", "#eab308", "#f4f4f4"];
-
-const MODEL_TASKS: { id: ModelTaskType; label: string }[] = [
-  { id: "general", label: "General conversation" },
-  { id: "research", label: "Research" },
-  { id: "coding", label: "Coding" },
-  { id: "data_analysis", label: "Data analysis" },
-  { id: "planning", label: "Planning" },
-];
-
-const modelKey = (selection?: ModelSelection | null) => selection ? `${selection.providerId}:${selection.model}` : "";
 
 function blankBot(defaultModel: string): BotInput {
   return {
@@ -31,10 +20,8 @@ function blankBot(defaultModel: string): BotInput {
     emoji: "",
     color: BOT_COLORS[Math.floor(Math.random() * BOT_COLORS.length)],
     model: defaultModel,
-    modelProvider: "nebius",
     tools: { webSearch: true, memory: true, codeMode: false, browser: false, askUser: true },
     approval: "ask",
-    approvalPermissions: [],
     pinned: false,
   };
 }
@@ -64,66 +51,25 @@ export function ColorPicker({ value, onChange }: { value: string; onChange: (c: 
 }
 
 /** Create or edit a bot. In edit mode the save bar appears only once something changes. */
-export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue?: BotInput; onDone?: (bot: Bot) => void }) {
+export function BotForm({ bot, onDone }: { bot?: Bot; onDone?: (bot: Bot) => void }) {
   const { state, open, toast } = useApp();
-  const defaultModel = state.models.find((m) => m.id === "MiniMaxAI/MiniMax-M3")?.id ?? state.models[0]?.id ?? "MiniMaxAI/MiniMax-M3";
-  const { options: connectionOptions } = useConnections(state.connectionsVersion);
-  const [initial, setInitial] = useState<BotInput>(() => (bot ? { ...bot } : initialValue ? { ...initialValue } : blankBot(defaultModel)));
+  const defaultModel =
+    state.models.find((m) => m.id === "ollama/qwen2.5:3b")?.id ??
+    state.models.find((m) => m.provider === "ollama")?.id ??
+    state.models[0]?.id ??
+    "ollama/qwen2.5:3b";
+  const [initial, setInitial] = useState<BotInput>(() => (bot ? { ...bot } : blankBot(defaultModel)));
   const [form, setForm] = useState<BotInput>(initial);
   const [saving, setSaving] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [skillCatalog, setSkillCatalog] = useState<SkillSummary[]>([]);
-  const [skillLoadError, setSkillLoadError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const keys = state.status?.keys;
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
-  const primarySelection = { providerId: form.modelProvider ?? "nebius", model: form.model } as const;
-  const modelSupportsTools = state.models.find((model) => model.providerId === primarySelection.providerId && model.id === primarySelection.model)?.tools ?? false;
-  const preferenceModels = state.models.filter((model) => model.available && (!Object.values(form.tools).some(Boolean) || model.tools));
-  const availableSkillTools = new Set<string>();
-  if (modelSupportsTools && form.tools.webSearch && keys?.tavily) {
-    availableSkillTools.add("web_search");
-    availableSkillTools.add("read_page");
-  }
-  if (modelSupportsTools && form.tools.codeMode) availableSkillTools.add("execute_typescript");
-  if (
-    modelSupportsTools &&
-    keys?.composio &&
-    (form.connections ?? []).some((id) => id.startsWith("composio:")) &&
-    connectionOptions.some((option) => option.kind === "composio" && (form.connections ?? []).includes(option.id))
-  ) {
-    availableSkillTools.add("COMPOSIO_MULTI_EXECUTE_TOOL");
-  }
 
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .skills()
-      .then(({ skills }) => {
-        if (!cancelled) {
-          setSkillCatalog(skills);
-          setSkillLoadError(null);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) setSkillLoadError(error instanceof Error ? error.message : "Couldn't load the skill library.");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const set = <K extends keyof BotInput>(k: K, v: BotInput[K]) => {
-    setErrorMessage(null);
-    setForm((f) => ({ ...f, [k]: v }));
-  };
-  const setTool = (k: keyof BotInput["tools"], v: boolean) => {
-    setErrorMessage(null);
-    setForm((f) => ({ ...f, tools: { ...f.tools, [k]: v } }));
-  };
+  const set = <K extends keyof BotInput>(k: K, v: BotInput[K]) => setForm((f) => ({ ...f, [k]: v }));
+  const setTool = (k: keyof BotInput["tools"], v: boolean) => setForm((f) => ({ ...f, tools: { ...f.tools, [k]: v } }));
 
   const save = async () => {
     setSaving(true);
-    setErrorMessage(null);
     try {
       if (bot) {
         const { bot: saved } = await api.updateBot(bot.id, form);
@@ -137,16 +83,14 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
         onDone?.(created);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Couldn't save.";
-      setErrorMessage(message);
-      toast(message);
+      toast(error instanceof Error ? error.message : "Couldn't save.");
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async () => {
-    if (!bot || !window.confirm(`Delete ${bot.name}? Its chat and MEMORY.md are deleted too.`)) return;
+    if (!bot) return;
     try {
       await api.deleteBot(bot.id);
       open(null);
@@ -158,11 +102,6 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
   return (
     <div className="flex flex-col">
       <div className="space-y-5">
-        {errorMessage && (
-          <p role="alert" className="rounded-xl bg-danger-soft px-3.5 py-2.5 text-[13px] text-danger">
-            {errorMessage}
-          </p>
-        )}
         {!bot && (
           <div className="flex flex-col items-center gap-4 pt-1">
             <Mascot color={form.color} size={72} />
@@ -213,109 +152,17 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
           />
         </Field>
 
-        <div>
-          <span className="mb-1.5 block text-[12.5px] font-medium text-mute">Reusable skills</span>
-          <p className="mb-2 text-[12px] leading-relaxed text-faint">
-            Select skills this bot can load on demand. Skills provide guidance only; they never add tools or change approval permissions.
-          </p>
-          {skillLoadError && <p role="alert" className="mb-2 rounded-xl bg-danger-soft px-3 py-2 text-[12px] text-danger">{skillLoadError}</p>}
-          <div className="divide-y divide-line rounded-2xl bg-raised px-4">
-            {skillCatalog.map((skill) => {
-              const missing = skill.requiredTools.filter((tool) => !availableSkillTools.has(tool));
-              const requirement = skill.requiredTools.length ? `Requires: ${skill.requiredTools.join(", ")}.` : "No external tools required.";
-              const status = missing.length ? `Not executable now; missing: ${missing.join(", ")}.` : "Executable with the current tool configuration.";
-              return (
-                <Toggle
-                  key={skill.id}
-                  label={skill.name}
-                  hint={`${skill.description} ${requirement} ${status}`}
-                  checked={(form.skillIds ?? []).includes(skill.id)}
-                  onChange={(on) => {
-                    const selected = new Set(form.skillIds ?? []);
-                    if (on) selected.add(skill.id);
-                    else selected.delete(skill.id);
-                    set("skillIds", [...selected]);
-                  }}
-                />
-              );
-            })}
-            {!skillCatalog.length && !skillLoadError && <p className="py-3 text-[12px] text-faint">Loading available skills…</p>}
-          </div>
-        </div>
-
         {/* Not a <label>: the picker holds buttons and its own search field. */}
         <div>
           <span className="mb-1.5 block text-[12.5px] font-medium text-mute">Model</span>
-          <ModelPicker
-            value={primarySelection}
-            onChange={(selection) => {
-              setErrorMessage(null);
-              setForm((current) => ({ ...current, model: selection.model, modelProvider: selection.providerId }));
-            }}
-          />
+          <ModelPicker value={form.model} onChange={(id) => set("model", id)} />
           <span className="mt-1.5 block text-[12px] leading-snug text-faint">
-            {!state.models.some((model) => model.available && model.providerId === primarySelection.providerId && model.id === primarySelection.model)
-              ? form.fallbackModel
-                ? "Primary model is unavailable; the configured fallback will be selected before the turn starts."
-                : primarySelection.providerId === "nebius" && !keys?.nebius
-                  ? "Mock mode: replies are scripted until NEBIUS_API_KEY is configured."
-                : "This model is unavailable. Requests will fail clearly; no unavailable model is silently substituted."
-              : primarySelection.providerId === "ollama"
-                ? "Local Ollama model. Credentials and endpoint configuration remain on the server."
-                : "Nebius Token Factory model."}
+            {state.status?.ollama?.available
+              ? `Using local Ollama (${state.status.ollama.baseUrl}).`
+              : state.status?.mock
+                ? "Mock mode: start local Ollama (qwen2.5:3b) or set NEBIUS_API_KEY for live responses."
+                : "Open-source models on Nebius Token Factory."}
           </span>
-          <details className="mt-3 rounded-2xl bg-raised px-4 py-3">
-            <summary className="cursor-pointer text-[13px] font-medium text-ink">Routing and fallback</summary>
-            <p className="mt-2 text-[12px] leading-relaxed text-faint">
-              Task routes use only available models. The explicit fallback is selected before a turn starts; requests are never replayed on another model after tool activity.
-            </p>
-            <div className="mt-3">
-              <Field label="Fallback model">
-              <select
-                className={inputClass}
-                value={modelKey(form.fallbackModel)}
-                onChange={(event) => {
-                  const selected = preferenceModels.find((model) => `${model.providerId}:${model.id}` === event.target.value);
-                  set("fallbackModel", selected ? { providerId: selected.providerId, model: selected.id } : null);
-                }}
-              >
-                <option value="">No fallback</option>
-                {preferenceModels.map((model) => (
-                  <option key={`${model.providerId}:${model.id}`} value={`${model.providerId}:${model.id}`}>
-                    {model.providerId === "nebius" ? "Nebius" : "Ollama"} · {model.label}
-                  </option>
-                ))}
-              </select>
-              </Field>
-            </div>
-            <div className="mt-3 space-y-3">
-              {MODEL_TASKS.map((task) => (
-                <Field key={task.id} label={`${task.label} model`}>
-                  <select
-                    className={inputClass}
-                    value={modelKey(form.modelRouting?.[task.id])}
-                    onChange={(event) => {
-                      const selected = preferenceModels.find((model) => `${model.providerId}:${model.id}` === event.target.value);
-                      setErrorMessage(null);
-                      setForm((current) => {
-                        const modelRouting = { ...current.modelRouting };
-                        if (selected) modelRouting[task.id] = { providerId: selected.providerId, model: selected.id };
-                        else delete modelRouting[task.id];
-                        return { ...current, modelRouting };
-                      });
-                    }}
-                  >
-                    <option value="">Use default model</option>
-                    {preferenceModels.map((model) => (
-                      <option key={`${model.providerId}:${model.id}`} value={`${model.providerId}:${model.id}`}>
-                        {model.providerId === "nebius" ? "Nebius" : "Ollama"} · {model.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              ))}
-            </div>
-          </details>
         </div>
 
         <div>
@@ -323,7 +170,7 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
           <div className="divide-y divide-line rounded-2xl bg-raised px-4">
             <Toggle
               label="Web search"
-              hint={keys?.tavily ? "Tavily search, page reading and site crawls." : "Tavily. Needs TAVILY_API_KEY."}
+              hint={keys?.tavily ? "Tavily search, page reading and site crawls." : "Tavily: Not configured (optional TAVILY_API_KEY)."}
               checked={form.tools.webSearch}
               onChange={(v) => setTool("webSearch", v)}
             />
@@ -336,7 +183,7 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
             />
             <Toggle
               label="Browser"
-              hint={keys?.browserbase ? "A Browserbase cloud browser you can watch live." : "Browserbase. Needs BROWSERBASE_API_KEY."}
+              hint={keys?.browserbase ? "A Browserbase cloud browser you can watch live." : "Browserbase: Not configured (optional BROWSERBASE_API_KEY)."}
               checked={form.tools.browser}
               onChange={(v) => setTool("browser", v)}
             />
@@ -349,34 +196,32 @@ export function BotForm({ bot, initialValue, onDone }: { bot?: Bot; initialValue
             value={form.approval}
             onChange={(v) => set("approval", v)}
             options={[
-              { value: "ask", label: "Ask first", hint: "Sensitive actions wait for your OK." },
-              { value: "controlled", label: "Controlled", hint: "Only listed safe tool IDs skip approval." },
-              { value: "full", label: "Full access", hint: "Configured tools run without individual prompts." },
+              { value: "restricted", label: "Read-only", hint: "Blocks memory edits, browser actions, and MCP actions." },
+              { value: "ask", label: "Ask first", hint: "Browser and MCP actions wait for your OK." },
+              { value: "full", label: "Full access", hint: "Acts without asking." },
             ]}
           />
         </Field>
-        {form.approval === "controlled" && (
-          <Field label="Allowed action IDs" hint="Exact tool IDs only, one per line. Sensitive, connected-app, and MCP actions still ask. Unavailable tools have no effect.">
-            <textarea
-              className={clsx(inputClass, "min-h-20 resize-y font-mono text-[12px]")}
-              value={(form.approvalPermissions ?? []).join("\n")}
-              maxLength={12_000}
-              onChange={(event) =>
-                set(
-                  "approvalPermissions",
-                  [...new Set(event.target.value.split(/[\n,]/).map((value) => value.trim()).filter(Boolean))],
-                )
-              }
-              placeholder="browser_goto"
-            />
-          </Field>
-        )}
 
         {bot && (
           <div className="pt-2">
-            <Button variant="danger" size="sm" onClick={remove}>
-              Delete bot
-            </Button>
+            {confirmDelete ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-danger-soft px-3.5 py-2.5 text-[12.5px] text-danger">
+                <span>Delete {bot.name}? Its chat and MEMORY.md will be deleted too.</span>
+                <span className="flex items-center gap-1.5">
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
+                    Cancel
+                  </Button>
+                  <Button variant="danger" size="sm" onClick={remove}>
+                    Confirm delete
+                  </Button>
+                </span>
+              </div>
+            ) : (
+              <Button variant="danger" size="sm" onClick={() => setConfirmDelete(true)}>
+                Delete bot
+              </Button>
+            )}
           </div>
         )}
       </div>

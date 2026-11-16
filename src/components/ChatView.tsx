@@ -1,33 +1,30 @@
 "use client";
 
 import clsx from "clsx";
-import { ArrowLeft, ArrowUp, AtSign, Eraser, MonitorPlay, MoreHorizontal, NotebookPen, PanelLeft, PanelRight, Plus, Square } from "lucide-react";
+import { ArrowLeft, ArrowUp, AtSign, Eraser, FileSpreadsheet, MonitorPlay, MoreHorizontal, NotebookPen, PanelLeft, PanelRight, Plus, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
 import type { Bot, ChatMessage, Room } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { MessageItem } from "./Message";
 import { Menu } from "./Sidebar";
-import { BotAvatar, IconButton, RoomAvatar } from "./ui";
+import { BotAvatar, Button, IconButton, RoomAvatar } from "./ui";
 
-function useClear(conversationId: string) {
-  const { dispatch, toast } = useApp();
-  return async () => {
-    if (!window.confirm("Clear this chat? The bots start a fresh thread. Their MEMORY.md is kept.")) return;
-    try {
-      await api.clear(conversationId);
-      dispatch({ type: "cleared", id: conversationId });
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "Couldn't clear the chat.");
-    }
-  };
-}
-
-function TopBar({ bot, room, members, running }: { bot?: Bot; room?: Room; members: Bot[]; running: string[] }) {
+function TopBar({
+  bot,
+  room,
+  members,
+  running,
+  onRequestClear,
+}: {
+  bot?: Bot;
+  room?: Room;
+  members: Bot[];
+  running: string[];
+  onRequestClear: () => void;
+}) {
   const { state, open, inspector, setInspector, sidebarOpen, setSidebarOpen } = useApp();
   const [menu, setMenu] = useState(false);
-  const conversationId = bot ? `dm:${bot.id}` : `room:${room!.id}`;
-  const clear = useClear(conversationId);
   const browserBotId = bot ? (state.liveViews[bot.id] ? bot.id : undefined) : [...running, ...members.map((m) => m.id)].find((id) => state.liveViews[id]);
 
   const toggleDetails = () => setInspector({ open: !inspector.open, tab: inspector.tab });
@@ -85,8 +82,8 @@ function TopBar({ bot, room, members, running }: { bot?: Bot; room?: Room; membe
                       { label: "Memory", icon: <NotebookPen size={15} />, onClick: () => openTab("memory") },
                       { label: "Browser", icon: <MonitorPlay size={15} />, onClick: () => openTab("browser") },
                     ]
-                  : []),
-                { label: "Clear chat", icon: <Eraser size={15} />, onClick: clear, danger: true },
+                  : [{ label: "Shared room memory", icon: <NotebookPen size={15} />, onClick: () => openTab("memory") }]),
+                { label: "Clear chat", icon: <Eraser size={15} />, onClick: onRequestClear, danger: true },
               ]}
             />
           )}
@@ -148,21 +145,24 @@ function Composer({
   members,
   running,
   prefill,
+  onRequestClear,
 }: {
   conversationId: string;
   name: string;
   members: Bot[];
   running: boolean;
   prefill?: string;
+  onRequestClear: () => void;
 }) {
   const { toast } = useApp();
   const [text, setText] = useState(() => prefill ?? readDraft(conversationId));
   const [sending, setSending] = useState(false);
+  const [uploadingCsv, setUploadingCsv] = useState(false);
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [plusMenu, setPlusMenu] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const clear = useClear(conversationId);
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -243,9 +243,36 @@ function Composer({
     }
   };
 
+  const handleCsvPick = async (file: File | undefined) => {
+    if (!file) return;
+    setUploadingCsv(true);
+    try {
+      const res = await api.uploadCsv(file);
+      const analystMention = members.some((m) => m.handle === "analyst") ? "@analyst " : "";
+      const nextText = `${analystMention}Analyze ${res.path} using read_csv and summarize revenue, cost, profit, monthly trends, and campaign recommendations.`;
+      setText(nextText);
+      toast(
+        `Uploaded ${res.path} (${res.report.rowCount} rows · Profit ${res.report.totals.profit.toLocaleString("en-US")}). Press Send to analyze.`,
+      );
+      requestAnimationFrame(() => ref.current?.focus());
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "CSV upload failed.");
+    } finally {
+      setUploadingCsv(false);
+      if (csvInputRef.current) csvInputRef.current.value = "";
+    }
+  };
+
   return (
     <div className="shrink-0 px-4 pt-2 pb-4">
       <div className="relative mx-auto max-w-[780px]">
+        <input
+          ref={csvInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          onChange={(e) => void handleCsvPick(e.target.files?.[0])}
+        />
         {mention && options.length > 0 && (
           <ul role="listbox" aria-label="Mention a bot" className="absolute bottom-full left-0 mb-2 w-72 rounded-2xl bg-raised p-1.5 shadow-pop ring-1 ring-line-strong">
             {options.map((m, i) => (
@@ -276,7 +303,12 @@ function Composer({
                 onClose={() => setPlusMenu(false)}
                 items={[
                   ...(members.length ? [{ label: "Mention a bot", icon: <AtSign size={15} />, onClick: startMention }] : []),
-                  { label: "Clear chat", icon: <Eraser size={15} />, onClick: clear, danger: true },
+                  {
+                    label: uploadingCsv ? "Uploading CSV…" : "Upload CSV",
+                    icon: <FileSpreadsheet size={15} />,
+                    onClick: () => csvInputRef.current?.click(),
+                  },
+                  { label: "Clear chat", icon: <Eraser size={15} />, onClick: onRequestClear, danger: true },
                 ]}
               />
             )}
@@ -343,12 +375,14 @@ function shouldShowAuthor(messages: ChatMessage[], i: number, isRoom: boolean): 
 }
 
 export function ChatView() {
-  const { state, sidebarOpen, setSidebarOpen } = useApp();
+  const { state, dispatch, refresh, sidebarOpen, setSidebarOpen, toast } = useApp();
   const [prefill, setPrefill] = useState<{ conversationId: string; text: string; n: number } | null>(null);
+  const [confirmClearId, setConfirmClearId] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
 
   const id = state.active;
+  const confirmClear = Boolean(id && confirmClearId === id);
   const [kind, targetId] = id ? id.split(":") : [null, null];
   const bot = kind === "dm" ? state.bots.find((b) => b.id === targetId) : undefined;
   const room = kind === "room" ? state.rooms.find((r) => r.id === targetId) : undefined;
@@ -366,6 +400,17 @@ export function ChatView() {
     if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  const confirmAndClear = async () => {
+    if (!id) return;
+    try {
+      await api.clear(id);
+      dispatch({ type: "cleared", id });
+      setConfirmClearId(null);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Couldn't clear the chat.");
+    }
+  };
+
   if (!id || (!bot && !room)) {
     return (
       <div className="relative flex flex-1 flex-col items-center justify-center px-6 text-center">
@@ -374,15 +419,44 @@ export function ChatView() {
             <PanelLeft size={18} />
           </IconButton>
         )}
-        <p className="text-[17px] font-medium">{state.loaded ? "Pick a bot or a room" : "Loading…"}</p>
+        <p className="text-[17px] font-medium">
+          {state.loaded ? "Pick a bot or a room" : state.bootstrapError ? "Couldn't load OpenCrewBot" : "Loading…"}
+        </p>
         {state.loaded && <p className="mt-1.5 max-w-sm text-[14px] text-mute">Every contact is an AI teammate with its own model, tools and memory.</p>}
+        {!state.loaded && state.bootstrapError && (
+          <div className="mt-3 flex flex-col items-center gap-3">
+            <p className="max-w-sm text-[13.5px] text-danger">{state.bootstrapError}</p>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              className="rounded-full bg-raised px-4 py-2 text-[13.5px] font-medium text-ink ring-1 ring-line hover:bg-raised-2"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="relative flex min-w-0 flex-1 flex-col">
-      <TopBar bot={bot} room={room} members={members} running={running} />
+      <TopBar bot={bot} room={room} members={members} running={running} onRequestClear={() => setConfirmClearId(id)} />
+      {confirmClear && (
+        <div className="mx-auto mt-16 flex w-full max-w-[780px] items-center justify-between gap-3 px-4">
+          <div className="flex w-full items-center justify-between gap-2 rounded-2xl bg-danger-soft px-4 py-2.5 text-[13px]">
+            <span className="text-danger">Clear this chat? The bots start a fresh thread; MEMORY.md is kept.</span>
+            <span className="flex shrink-0 gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setConfirmClearId(null)}>
+                Cancel
+              </Button>
+              <Button size="sm" variant="danger" onClick={() => void confirmAndClear()}>
+                Clear chat
+              </Button>
+            </span>
+          </div>
+        </div>
+      )}
       <div
         ref={scroller}
         onScroll={(e) => {
@@ -403,6 +477,13 @@ export function ChatView() {
           </div>
         )}
       </div>
+      {state.status?.mock && (
+        <div className="mx-auto mb-1 flex w-full max-w-[780px] items-center justify-between gap-2 px-4">
+          <p className="w-full rounded-xl bg-warn-soft px-3 py-1.5 text-center text-[12px] text-warn">
+            Local Ollama ({state.status.ollama.baseUrl}) is unreachable — replies below are simulated demo responses, not live AI inference.
+          </p>
+        </div>
+      )}
       <Composer
         key={`${id}:${prefill?.conversationId === id ? prefill.n : 0}`}
         conversationId={id}
@@ -410,6 +491,7 @@ export function ChatView() {
         members={members}
         running={running.length > 0}
         prefill={prefill?.conversationId === id ? prefill.text : undefined}
+        onRequestClear={() => setConfirmClearId(id)}
       />
     </div>
   );

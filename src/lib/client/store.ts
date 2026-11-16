@@ -1,56 +1,52 @@
 // Client state: one reducer folds the bootstrap payload, transcript loads and
 // the live SSE events into what the UI renders.
-import type {
-  AppStatus,
-  Bot,
-  ChatMessage,
-  ConversationId,
-  ConversationSummary,
-  ModelOption,
-  ModelProviderStatus,
-  Room,
-  ServerEvent,
-} from "@/lib/shared/types";
+import type { AppStatus, Bot, ChatMessage, ConversationId, ConversationSummary, ModelOption, Room, ServerEvent } from "@/lib/shared/types";
 import { messagePreview } from "./format";
 
 export interface AppState {
   loaded: boolean;
+  bootstrapError: string | null;
   status: AppStatus | null;
   bots: Bot[];
   rooms: Room[];
   models: ModelOption[];
-  modelProviders: ModelProviderStatus[];
   summaries: Record<ConversationId, ConversationSummary>;
   /** Transcripts loaded so far, keyed by conversation. */
   transcripts: Record<ConversationId, ChatMessage[]>;
   active: ConversationId | null;
   /** Bumped when a bot's MEMORY.md changes, so an open memory editor can refresh. */
   memoryVersion: Record<string, number>;
-  /** Bumped when shared project memory or its access list changes. */
-  projectMemoryVersion: number;
+  /** Bumped when a room's shared MEMORY.md changes. */
+  roomMemoryVersion: Record<string, number>;
   /** Finished bot replies already counted toward unread badges. */
   counted: Record<string, true>;
   /** botId → Browserbase live view of that bot's open browser. */
   liveViews: Record<string, string>;
   /** Bumped when apps or MCP servers change, so views refetch them. */
   connectionsVersion: number;
+  /** Bumped when scheduled workflows or execution runs change. */
+  schedulesVersion: number;
+  /** Bumped when messages update tool parts (such as approvals). */
+  approvalsVersion: number;
 }
 
 export const initialState: AppState = {
   loaded: false,
+  bootstrapError: null,
   status: null,
   bots: [],
   rooms: [],
   models: [],
-  modelProviders: [],
   summaries: {},
   transcripts: {},
   active: null,
   memoryVersion: {},
-  projectMemoryVersion: 0,
+  roomMemoryVersion: {},
   counted: {},
   liveViews: {},
   connectionsVersion: 0,
+  schedulesVersion: 0,
+  approvalsVersion: 0,
 };
 
 export type Action =
@@ -60,12 +56,12 @@ export type Action =
       bots: Bot[];
       rooms: Room[];
       models: ModelOption[];
-      modelProviders: ModelProviderStatus[];
       conversations: ConversationSummary[];
       liveViews: Record<string, string>;
     }
+  | { type: "bootstrap-error"; error: string }
   | { type: "open"; id: ConversationId | null }
-  | { type: "models"; models: ModelOption[]; providers: ModelProviderStatus[] }
+  | { type: "models"; models: ModelOption[] }
   | { type: "transcript"; id: ConversationId; messages: ChatMessage[]; running: string[] }
   | { type: "cleared"; id: ConversationId }
   | { type: "event"; event: ServerEvent };
@@ -101,17 +97,19 @@ export function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         loaded: true,
+        bootstrapError: null,
         status: action.status,
         bots: action.bots,
         rooms: action.rooms,
         models: action.models,
-        modelProviders: action.modelProviders,
         summaries,
         liveViews: action.liveViews,
       };
     }
+    case "bootstrap-error":
+      return { ...state, bootstrapError: action.error };
     case "models":
-      return { ...state, models: action.models, modelProviders: action.providers };
+      return { ...state, models: action.models };
     case "open": {
       if (!action.id) return { ...state, active: null };
       const prev = state.summaries[action.id];
@@ -148,11 +146,13 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
       const { message } = event;
       const list = state.transcripts[message.conversationId];
       const isNewReply = message.role === "bot" && message.status !== "streaming" && !state.counted[message.id];
+      const hasToolParts = message.parts.some((p) => p.kind === "tool");
       return {
         ...state,
         transcripts: list ? { ...state.transcripts, [message.conversationId]: upsert(list, message) } : state.transcripts,
         summaries: touchSummary(state, message, isNewReply),
         counted: isNewReply ? { ...state.counted, [message.id]: true } : state.counted,
+        approvalsVersion: hasToolParts ? state.approvalsVersion + 1 : state.approvalsVersion,
       };
     }
     case "delta": {
@@ -175,8 +175,11 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
     }
     case "memory-changed":
       return { ...state, memoryVersion: { ...state.memoryVersion, [event.botId]: (state.memoryVersion[event.botId] ?? 0) + 1 } };
-    case "project-memory-changed":
-      return { ...state, projectMemoryVersion: state.projectMemoryVersion + 1 };
+    case "room-memory-changed":
+      return {
+        ...state,
+        roomMemoryVersion: { ...state.roomMemoryVersion, [event.roomId]: (state.roomMemoryVersion[event.roomId] ?? 0) + 1 },
+      };
     case "browser-session": {
       const liveViews = { ...state.liveViews };
       if (event.liveUrl) liveViews[event.botId] = event.liveUrl;
@@ -185,6 +188,8 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
     }
     case "connections-changed":
       return { ...state, connectionsVersion: state.connectionsVersion + 1 };
+    case "schedules-changed":
+      return { ...state, schedulesVersion: state.schedulesVersion + 1 };
     case "bots-changed":
     case "rooms-changed":
       // The provider refetches the bootstrap payload for these.

@@ -8,7 +8,7 @@ import type { McpServer } from "@/lib/shared/types";
 import { getSetting, setSetting } from "./db";
 import { InputError } from "./errors";
 
-interface StoredServer {
+export interface StoredServer {
   id: string;
   name: string;
   url: string;
@@ -22,6 +22,10 @@ const KEY = "mcp.servers";
 
 async function stored(): Promise<StoredServer[]> {
   return (await getSetting<StoredServer[]>(KEY)) ?? [];
+}
+
+export async function listStoredServers(): Promise<StoredServer[]> {
+  return stored();
 }
 
 function toPublic(s: StoredServer): McpServer {

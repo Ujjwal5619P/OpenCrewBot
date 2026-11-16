@@ -1,6 +1,10 @@
 import { handle } from "@/lib/server/http";
-import { listApprovalRequests } from "@/lib/server/db";
+import { listPendingApprovals } from "@/lib/server/runtime";
+import { boot } from "@/lib/server/service";
 
 export async function GET() {
-  return handle(async () => ({ requests: await listApprovalRequests() }));
+  return handle(async () => {
+    await boot();
+    return { approvals: await listPendingApprovals() };
+  });
 }

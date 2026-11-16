@@ -5,7 +5,7 @@ import { Check, RefreshCw, Search, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
 import { formatContext } from "@/lib/client/format";
-import type { ModelOption, ModelSelection } from "@/lib/shared/types";
+import type { ModelOption } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { Drawer } from "./ui";
 
@@ -13,23 +13,24 @@ const price = (n: number | null) => (n === null ? "–" : `$${Number(n.toFixed(2
 
 /** Three starting points, picked from whatever the live catalog has. */
 const SUGGESTIONS: { tag: string; why: string; ids: string[] }[] = [
+  { tag: "Local (Ollama)", why: "Runs locally via Ollama with no API keys or cloud costs", ids: ["ollama/qwen2.5:3b", "ollama/qwen3:4b"] },
   { tag: "Fastest", why: "Quick replies for the lowest cost", ids: ["nvidia/Nemotron-3_5-Lightning", "deepseek-ai/DeepSeek-V4-Flash-0731"] },
   { tag: "Best all-rounder", why: "Good tool use, 1M context, low price", ids: ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"] },
   { tag: "Strongest", why: "Hard research, planning and code", ids: ["Qwen/Qwen3.5-397B-A17B", "deepseek-ai/DeepSeek-V4-Pro", "zai-org/GLM-5.3"] },
 ];
 
-function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick: (selection: ModelSelection) => void; onClose: () => void }) {
+function ModelDialog({ value, onPick, onClose }: { value: string; onPick: (id: string) => void; onClose: () => void }) {
   const { state, dispatch, toast } = useApp();
   const [query, setQuery] = useState("");
   const [toolsOnly, setToolsOnly] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
-  const live = state.models.some((m) => m.providerId === "nebius" && m.live);
+  const live = state.models.some((m) => m.live);
 
   const suggestions = useMemo(
     () =>
-      SUGGESTIONS.map((s) => ({ ...s, model: s.ids.map((id) => state.models.find((m) => m.providerId === "nebius" && m.id === id)).find(Boolean) })).filter(
+      SUGGESTIONS.map((s) => ({ ...s, model: s.ids.map((id) => state.models.find((m) => m.id === id)).find(Boolean) })).filter(
         (s): s is (typeof SUGGESTIONS)[number] & { model: ModelOption } => Boolean(s.model),
       ),
     [state.models],
@@ -38,8 +39,8 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
   const models = useMemo(() => {
     const q = query.trim().toLowerCase();
     return state.models
-      .filter((m) => (!toolsOnly || m.tools) && (!q || `${m.id} ${m.label} ${m.provider} ${m.providerId}`.toLowerCase().includes(q)))
-      .sort((a, b) => a.providerId.localeCompare(b.providerId) || a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
+      .filter((m) => (!toolsOnly || m.tools) && (!q || `${m.id} ${m.label} ${m.provider}`.toLowerCase().includes(q)))
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
   }, [state.models, query, toolsOnly]);
 
   // Keep the keyboard-highlighted row in view.
@@ -50,8 +51,8 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
   const refresh = async () => {
     setRefreshing(true);
     try {
-      const { models, providers } = await api.models(true);
-      dispatch({ type: "models", models, providers });
+      const { models: fresh } = await api.models(true);
+      dispatch({ type: "models", models: fresh });
     } catch (error) {
       toast(error instanceof Error ? error.message : "Couldn't refresh models.");
     } finally {
@@ -80,7 +81,7 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
                   e.preventDefault();
                   setActive((i) => Math.max(i - 1, 0));
                 } else if (e.key === "Enter" && models[active]) {
-                  onPick({ providerId: models[active].providerId, model: models[active].id });
+                  onPick(models[active].id);
                 }
               }}
               placeholder="Search models"
@@ -92,7 +93,7 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
             type="button"
             onClick={refresh}
             disabled={refreshing}
-            title="Refresh provider model discovery"
+            title="Refresh from Nebius Token Factory"
             aria-label="Refresh model list"
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-raised text-mute ring-1 ring-line hover:text-ink disabled:opacity-50"
           >
@@ -101,26 +102,17 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
         </div>
       </div>
 
-      <div className="mb-4 space-y-1.5">
-        {state.modelProviders.map((provider) => (
-          <p key={provider.providerId} className="text-[12px] text-faint">
-            {provider.label}: {provider.available ? "available" : provider.configured ? "unavailable" : "not configured"}
-            {provider.message ? ` — ${provider.message}` : ""}
-          </p>
-        ))}
-      </div>
-
       {!query && suggestions.length > 0 && (
         <section className="mb-5">
           <h3 className="mb-2 text-[12.5px] font-medium text-mute">Suggested</h3>
           <div className="space-y-2">
             {suggestions.map(({ tag, why, model }) => {
-              const selected = model.providerId === value.providerId && model.id === value.model;
+              const selected = model.id === value;
               return (
                 <button
                   key={tag}
                   type="button"
-                  onClick={() => onPick({ providerId: model.providerId, model: model.id })}
+                  onClick={() => onPick(model.id)}
                   className={clsx(
                     "flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left ring-1 transition-colors",
                     selected ? "bg-accent-soft ring-accent/50" : "bg-raised ring-line hover:bg-raised-2",
@@ -154,26 +146,19 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
         </div>
         <ul ref={listRef} role="listbox" aria-label="Models" className="-mx-2">
           {models.map((m, i) => {
-            const selected = m.providerId === value.providerId && m.id === value.model;
+            const selected = m.id === value;
             return (
-              <li key={`${m.providerId}:${m.id}`} role="option" aria-selected={selected} data-index={i}>
+              <li key={m.id} role="option" aria-selected={selected} data-index={i}>
                 <button
                   type="button"
-                  onClick={() => onPick({ providerId: m.providerId, model: m.id })}
+                  onClick={() => onPick(m.id)}
                   onMouseEnter={() => setActive(i)}
                   className={clsx("flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left", i === active && "bg-raised")}
                 >
                   <span className="min-w-0 flex-1">
                     <span className={clsx("block truncate text-[14px]", selected ? "text-[#8db4ff]" : "text-ink")}>{m.label}</span>
                     <span className="mt-0.5 block truncate text-[12px] text-faint">
-                      {[
-                        m.providerId === "nebius" ? `Nebius · ${m.provider}` : `Ollama · ${m.provider}`,
-                        m.context ? `${formatContext(m.context)} context` : "context unknown",
-                        m.vision && "vision",
-                        m.reasoning && "reasoning",
-                        m.tools ? "tool-capable" : "no verified tool support",
-                        m.available ? "available" : "unavailable",
-                      ].filter(Boolean).join(" · ")}
+                      {[m.provider, `${formatContext(m.context)} context`, m.vision && "vision", m.reasoning && "reasoning", !m.tools && "no tools"].filter(Boolean).join(" · ")}
                     </span>
                   </span>
                   <span className="shrink-0 text-right text-[12px] text-mute tabular-nums">
@@ -191,8 +176,10 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
       <p className="mt-4 flex items-start gap-1.5 text-[12px] leading-snug text-faint">
         <Sparkles size={13} className="mt-px shrink-0" />
         <span>
-          {live ? `Nebius models are discovered live. Prices are $ in / out per 1M tokens. ` : "Nebius uses a built-in catalog until NEBIUS_API_KEY is configured. "}
-          Ollama discovery shows up to 20 installed models from OLLAMA_BASE_URL. Unavailable models are not selected automatically.
+          {live
+            ? "Includes live models from local Ollama and/or Nebius Token Factory. "
+            : "Local Ollama (qwen2.5:3b) and built-in catalog. Start Ollama locally or optionally add NEBIUS_API_KEY. "}
+          Auto routing, where Jev picks a model per message, is coming soon.
         </span>
       </p>
     </Drawer>
@@ -200,10 +187,10 @@ function ModelDialog({ value, onPick, onClose }: { value: ModelSelection; onPick
 }
 
 /** The current model as a compact row; Change opens the chooser. */
-export function ModelPicker({ value, onChange, disabled }: { value: ModelSelection; onChange: (selection: ModelSelection) => void; disabled?: boolean }) {
+export function ModelPicker({ value, onChange, disabled }: { value: string; onChange: (id: string) => void; disabled?: boolean }) {
   const { state } = useApp();
   const [open, setOpen] = useState(false);
-  const current = state.models.find((m) => m.providerId === value.providerId && m.id === value.model);
+  const current = state.models.find((m) => m.id === value);
 
   return (
     <>
@@ -214,24 +201,19 @@ export function ModelPicker({ value, onChange, disabled }: { value: ModelSelecti
         className="flex w-full items-center gap-3 rounded-2xl bg-raised px-4 py-3 text-left transition-colors hover:bg-hover disabled:opacity-60"
       >
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[14.5px] text-ink">{current?.label ?? value.model.split("/").pop()}</span>
+          <span className="block truncate text-[14.5px] text-ink">{current?.label ?? value.split("/").pop()}</span>
           <span className="mt-0.5 block truncate text-[12.5px] text-mute">
             {current
-              ? [
-                  value.providerId === "nebius" ? "Nebius Token Factory" : "Ollama",
-                  current.available ? "Available" : "Unavailable",
-                  current.context ? `${formatContext(current.context)} context` : "Context unknown",
-                  current.inputPerM !== null && `${price(current.inputPerM)} / ${price(current.outputPerM)} per 1M`,
-                ]
+              ? [current.provider, `${formatContext(current.context)} context`, current.inputPerM !== null && `${price(current.inputPerM)} / ${price(current.outputPerM)} per 1M`]
                   .filter(Boolean)
                   .join(" · ")
-              : `${value.providerId === "nebius" ? "Nebius" : "Ollama"} model is not in the current catalog`}
+              : "Not in the current catalog"}
           </span>
         </span>
         <span className="shrink-0 rounded-full bg-raised-2 px-3 py-1 text-[12.5px] font-medium text-ink">Change</span>
       </button>
       {current && !current.tools && (
-        <p className="mt-1.5 px-1 text-[12.5px] text-warn">Tool support is not verified for this model; bots with tools cannot use it.</p>
+        <p className="mt-1.5 px-1 text-[12.5px] text-warn">This model can’t call tools, so search, memory, connections and the browser won’t work.</p>
       )}
       {open && (
         <ModelDialog

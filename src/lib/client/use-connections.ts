@@ -27,9 +27,12 @@ export function useConnections(version: number) {
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
-  /** What a bot can be given: connected apps, then MCP servers. */
+  /** What a bot can be given: connected apps, MCP servers, and env GitHub token if set. */
   const options: ConnectionOption[] = data
     ? [
+        ...(data.github?.configured && data.github.source === "env"
+          ? [{ id: "github:env", name: data.github.login ? `GitHub (@${data.github.login})` : "GitHub", kind: "github" as const }]
+          : []),
         ...data.composio.apps.filter((a) => a.connected).map((a) => ({ id: `composio:${a.slug}`, name: a.name, kind: "composio" as const, logo: a.logo })),
         ...data.mcpServers.map((s) => ({ id: `mcp:${s.id}`, name: s.name, kind: "mcp" as const })),
       ]

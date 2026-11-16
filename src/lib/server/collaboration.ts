@@ -9,16 +9,15 @@ import { delegationPattern, validateCollaborationPlan, validateDelegationDepth }
 const MAX_MESSAGES_PER_HOUR = 60;
 
 const TaskSchema = z.object({
-  id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/),
-  title: z.string().trim().min(1).max(120),
-  objective: z.string().trim().min(1).max(4_000),
-  context: z.string().trim().max(8_000),
-  expectedOutput: z.string().trim().min(1).max(2_000),
-  assignedBotId: z.string().min(1).max(100),
-  dependencies: z.array(z.string().min(1).max(64)).max(20),
-  verificationOfTaskId: z.string().min(1).max(64).optional(),
-}).strict();
-
+  id: z.string().optional(),
+  title: z.string().optional(),
+  objective: z.string().optional(),
+  context: z.string().optional(),
+  expectedOutput: z.string().optional(),
+  assignedBotId: z.string().optional(),
+  dependencies: z.array(z.string()).optional(),
+  verificationOfTaskId: z.string().optional(),
+}).passthrough();
 const DelegationSchema = z.object({
   tasks: z.array(TaskSchema).min(1).max(20),
 }).strict();
@@ -112,13 +111,87 @@ async function recordRejection(context: RoomContext, botId: string, reason: stri
   await store.saveCollaborationMessage(newMessage(context, botId, "delegation_rejected", reason));
 }
 
+async function normalizeAssignedBotIds(
+  tasks: CollaborationTaskSpec[],
+  memberIds: string[],
+  delegatorBotId: string,
+): Promise<CollaborationTaskSpec[]> {
+  const members = (await Promise.all(
+    memberIds.map((id) => store.getBot(id)),
+  )).filter((member) => member != null);
+
+  return tasks.map((task) => {
+    const rawId =
+      typeof task.assignedBotId === "string"
+        ? task.assignedBotId.trim()
+        : "";
+
+    const candidate = rawId.replace(/^@/, "").toLowerCase();
+
+    let assignedBotId = memberIds.includes(rawId) ? rawId : "";
+
+    if (!assignedBotId && candidate) {
+      const matches = members.filter(
+        (member) =>
+          member.name.toLowerCase() === candidate ||
+          member.handle.toLowerCase() === candidate,
+      );
+
+      if (matches.length === 1) assignedBotId = matches[0].id;
+      else if (matches.length > 1) {
+        throw new InputError(`Ambiguous room member "${rawId}". Use the exact bot ID.`);
+      }
+    }
+
+    if (!assignedBotId) {
+      assignedBotId = memberIds.find((id) => id !== delegatorBotId) ?? "";
+    }
+
+    if (!assignedBotId) {
+      throw new InputError("No other room member is available for delegation.");
+    }
+
+    return { ...task, assignedBotId };
+  });
+}
 export async function delegateRoomWork(botId: string, threadId: string, rawInput: unknown, signal?: AbortSignal) {
   const context = await roomContext(botId, threadId);
   try {
     ensureActive(signal);
     const parsed = DelegationSchema.safeParse(rawInput);
     if (!parsed.success) throw new InputError("Delegation must include 1-20 valid, structured tasks.");
-    const tasks = parsed.data.tasks as CollaborationTaskSpec[];
+    const normalizedTasks = parsed.data.tasks.map((raw, index): CollaborationTaskSpec => {
+      const item = raw as Record<string, unknown>;
+      const getText = (...keys: string[]): string => {
+        for (const key of keys) {
+          const value = item[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+        return "";
+      };
+
+      const title = getText("title", "name", "task");
+      const objective = getText("objective", "description", "instruction", "taskDescription") || title;
+
+      if (!objective) throw new InputError(`Task ${index + 1} has no objective.`);
+
+      return {
+        id: getText("id", "taskId") || `task-${index + 1}`,
+        title: title || objective.slice(0, 120),
+        objective,
+        context: getText("context", "background"),
+        expectedOutput: getText("expectedOutput", "expected_output", "deliverable") || `Provide results for: ${objective}`,
+        assignedBotId: getText("assignedBotId", "assigned_bot_id", "assignee", "memberId"),
+        dependencies: Array.isArray(item.dependencies) ? item.dependencies.filter((v): v is string => typeof v === "string") : [],
+        ...(typeof item.verificationOfTaskId === "string" ? { verificationOfTaskId: item.verificationOfTaskId } : {}),
+      };
+    });
+
+    const tasks = await normalizeAssignedBotIds(
+      normalizedTasks,
+      context.room.memberIds,
+      botId,
+    );
     try {
       validateCollaborationPlan(tasks, new Set(context.room.memberIds), botId);
     } catch (error) {

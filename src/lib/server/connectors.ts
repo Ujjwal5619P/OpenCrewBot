@@ -1,11 +1,13 @@
 // Turns a bot's chosen connections into tools: Composio apps share one
 // session, and each MCP server gets its own client.
+import { createTool } from "@mastra/core/tools";
 import type { ToolsInput } from "@mastra/core/agent";
 import type { Bot } from "@/lib/shared/types";
 import { composioTools } from "./composio";
 import { getSetting, setSetting } from "./db";
 import { publish } from "./bus";
-import { listServers, mcpTools } from "./mcp-servers";
+import { GithubReposListInputSchema, botHasGithubPermission, getWorkspaceGithubStatus, listGithubRepositories } from "./github";
+import { listServers, listStoredServers, mcpTools } from "./mcp-servers";
 import { keys } from "./config";
 
 const VERSION_KEY = "connections.version";
@@ -33,33 +35,23 @@ export interface ConnectorToolset {
 const appName = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1);
 
 export async function buildConnectorTools(bot: Bot, clientId: string): Promise<ConnectorToolset> {
-  const composioSlugs = bot.connections
-    .filter((c) => c.startsWith("composio:"))
-    .map((c) => c.slice("composio:".length));
-  const mcpIds = bot.connections
-    .filter((c) => c.startsWith("mcp:"))
-    .map((c) => c.slice("mcp:".length));
+  const composioSlugs = bot.connections.filter((c) => c.startsWith("composio:")).map((c) => c.slice("composio:".length));
+  const mcpIds = bot.connections.filter((c) => c.startsWith("mcp:")).map((c) => c.slice("mcp:".length));
   const tools: ToolsInput = {};
   const capabilities: string[] = [];
   let close = async () => {};
 
   if (composioSlugs.length && keys.composio()) {
     try {
-      const loadedTools = await composioTools(composioSlugs);
-
-      Object.assign(tools, loadedTools);
+      Object.assign(tools, await composioTools(composioSlugs));
       capabilities.push(
-        `Use the person's connected apps (${composioSlugs.map(appName).join(", ")}). For GitHub repository listing, call github_list_repositories directly. Present its complete returned table and total verbatim, then stop the turn; do not call project memory or any other tool, and do not analyse repository descriptions. For other connected-app actions, discover actions with COMPOSIO_SEARCH_TOOLS and execute them with COMPOSIO_MULTI_EXECUTE_TOOL. Actions that change data require the person's approval unless you have Full access. If an app isn't connected, tell them to connect it in Connections.`,
+        `Use the person's connected apps (${composioSlugs.map(appName).join(", ")}): find the right action with COMPOSIO_SEARCH_TOOLS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Actions ask the person first unless you have full access. If an app isn't connected, tell them to connect it in Connections.`,
       );
     } catch (error) {
-      capabilities.push(
-        `Connected apps are switched on for you but couldn't load right now (${error instanceof Error ? error.message : "unknown error"}). Say so if asked.`,
-      );
+      capabilities.push(`Connected apps are switched on for you but couldn't load right now (${error instanceof Error ? error.message : "unknown error"}). Say so if asked.`);
     }
   } else if (composioSlugs.length) {
-    capabilities.push(
-      "Connected apps are switched on for you, but no COMPOSIO_API_KEY is set, so you can't use them right now.",
-    );
+    capabilities.push("Connected apps are switched on for you, but no COMPOSIO_API_KEY is set, so you can't use them right now.");
   }
 
   if (mcpIds.length) {
@@ -70,11 +62,34 @@ export async function buildConnectorTools(bot: Bot, clientId: string): Promise<C
     close = result.close;
     const names = servers.filter((s) => mcpIds.includes(s.id)).map((s) => s.name);
     if (Object.keys(result.tools).length) {
-      capabilities.push(
-        `Use tools from ${names.join(", ")} (the mcp_* tools). Actions that change things ask the person first unless you have full access.`,
-      );
+      capabilities.push(`Use tools from ${names.join(", ")} (the mcp_* tools). Actions that change things ask the person first unless you have full access.`);
     }
     for (const e of result.errors) capabilities.push(`Couldn't connect to ${e}. Say so if asked.`);
+  }
+
+  const storedServers = await listStoredServers();
+  if (botHasGithubPermission(bot, storedServers)) {
+    tools.github_repos_list = createTool({
+      id: "github_repos_list",
+      description:
+        "List repositories from the authenticated GitHub account (returns name, full_name, description, private/visibility, default_branch, html_url). Always pass required arguments: visibility ('all' | 'public' | 'private'), perPage (1-100), and page (>=1). Set allPages: true to fetch all pages.",
+      inputSchema: GithubReposListInputSchema,
+      execute: async (input) => await listGithubRepositories(bot, input),
+    });
+    const ghStatus = await getWorkspaceGithubStatus(false);
+    if (ghStatus.configured) {
+      capabilities.push(
+        `List repositories from the authenticated GitHub account using \`github_repos_list\` (required args: \`visibility\`, \`perPage\`, \`page\`; optional \`allPages: true\`). Never invent repository names.`,
+      );
+    } else {
+      capabilities.push(
+        "GitHub is switched on for you, but no GitHub credentials are connected yet. Tell the person to connect GitHub in Connections (GitHub MCP preset with a Personal Access Token, Composio GitHub OAuth, or GITHUB_TOKEN in .env).",
+      );
+    }
+  } else {
+    capabilities.push(
+      "GitHub is not connected or enabled for you. If asked to list GitHub repositories, tell the person to connect GitHub in Connections and switch it on in your Details -> Connections. Never call `run_skill` for GitHub.",
+    );
   }
 
   return { tools, capabilities, close };

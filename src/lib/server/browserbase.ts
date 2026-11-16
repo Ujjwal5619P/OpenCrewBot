@@ -17,7 +17,7 @@ const sessions = (g.__opencrewbotBrowserbase ??= new Map());
 
 function apiKey(): string {
   const key = process.env.BROWSERBASE_API_KEY;
-  if (!key) throw new Error("The browser runs on Browserbase. Set BROWSERBASE_API_KEY in .env and restart the app.");
+  if (!key) throw new Error("Browserbase is not configured (BROWSERBASE_API_KEY is not set). Configure it in .env to enable cloud browsing.");
   return key;
 }
 

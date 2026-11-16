@@ -1,33 +1,6 @@
 // Types shared by the server and the browser. Everything here is plain JSON.
 
-export type ApprovalMode = "ask" | "controlled" | "full";
-
-export type ApprovalRequestStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "cancelled"
-  | "expired"
-  | "failed"
-  | "outcome_unknown";
-
-export interface ApprovalRequest {
-  id: string;
-  conversationId: ConversationId;
-  botId: string;
-  messageId: string;
-  toolCallId: string;
-  toolName: string;
-  action: string;
-  details: string;
-  status: ApprovalRequestStatus;
-  createdAt: string;
-  expiresAt: string;
-  decidedAt?: string;
-  decisionBy?: string;
-  executionId?: string;
-  taskId?: string;
-}
+export type ApprovalMode = "restricted" | "ask" | "full";
 
 export interface BotTools {
   /** Tavily search, extract and crawl. */
@@ -53,50 +26,15 @@ export interface Bot {
   emoji: string;
   color: string;
   model: string;
-  /** Missing on legacy records; defaults to Nebius Token Factory. */
-  modelProvider?: ModelProviderId;
-  fallbackModel?: ModelSelection;
-  modelRouting?: Partial<Record<ModelTaskType, ModelSelection>>;
   tools: BotTools;
   /** Connection ids this bot may use: `composio:<toolkit>` or `mcp:<serverId>`. */
   connections: string[];
-  /** Reusable skills enabled for this bot. Missing on legacy bot records. */
-  skillIds?: string[];
   approval: ApprovalMode;
-  /** Exact registered tool IDs that Controlled Access may auto-approve, subject to sensitive-action checks. */
-  approvalPermissions?: string[];
   pinned: boolean;
   createdAt: string;
 }
 
-export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections" | "fallbackModel"> & {
-  handle?: string;
-  connections?: string[];
-  fallbackModel?: ModelSelection | null;
-};
-
-export interface AgentConfiguration {
-  name: string;
-  title: string;
-  description: string;
-  instructions: string;
-  model: string;
-  modelProvider?: ModelProviderId;
-  tools: BotTools;
-  skills: string[];
-  memory: { enabled: boolean; guidance: string };
-  approval: ApprovalMode;
-  approvalPermissions: { browserActions: "ask"; connectedAppActions: "ask" };
-  expectedOutputFormat: string;
-}
-
-export interface AgentConfigurationResult {
-  configuration: AgentConfiguration;
-  botInput: BotInput;
-  mode: "live" | "simulated";
-  label: string;
-  unavailableTools: ("webSearch" | "browser")[];
-}
+export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections"> & { handle?: string; connections?: string[] };
 
 export type RoomResponder = "auto" | "lead" | "everyone";
 
@@ -122,7 +60,7 @@ export interface Source {
   url: string;
 }
 
-export type ToolStatus = "running" | "awaiting-approval" | "done" | "error" | "denied" | "outcome_unknown";
+export type ToolStatus = "running" | "awaiting-approval" | "done" | "error" | "denied";
 
 export type Part =
   | { kind: "text"; text: string }
@@ -161,16 +99,7 @@ export interface ChatMessage {
   status: MessageStatus;
   parts: Part[];
   model?: string;
-  usage?: {
-    input: number | null;
-    output: number | null;
-    costUsd: number | null;
-    provider: ModelProviderId | "mock";
-    model: string;
-    requestedAt: string;
-    simulated: boolean;
-    fallbackFrom?: ModelSelection;
-  };
+  usage?: { input: number; output: number; costUsd: number | null };
   route?: RouteNote;
   error?: string;
 }
@@ -185,9 +114,7 @@ export interface ConversationSummary {
 export interface ModelOption {
   id: string;
   label: string;
-  /** Model family or upstream publisher, retained for the picker. */
   provider: string;
-  providerId: ModelProviderId;
   context: number;
   tools: boolean;
   reasoning: boolean;
@@ -195,43 +122,12 @@ export interface ModelOption {
   inputPerM: number | null;
   outputPerM: number | null;
   live: boolean;
-  available: boolean;
-}
-
-export type ModelProviderId = "nebius" | "ollama";
-export type ModelTaskType = "general" | "research" | "coding" | "data_analysis" | "planning";
-
-export interface ModelSelection {
-  providerId: ModelProviderId;
-  model: string;
-}
-
-export interface ModelProviderStatus {
-  providerId: ModelProviderId;
-  label: string;
-  available: boolean;
-  configured: boolean;
-  message?: string;
-}
-
-export interface ModelUsageSummary {
-  provider: ModelProviderId | "mock";
-  model: string;
-  requests: number;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  costUsd: number | null;
-  unknownInputRequests: number;
-  unknownOutputRequests: number;
-  unknownCostRequests: number;
-  simulatedRequests: number;
-  fallbackRequests: number;
-  lastRequestedAt: string;
 }
 
 export interface AppStatus {
   mock: boolean;
   keys: { nebius: boolean; tavily: boolean; jev: boolean; browserbase: boolean; composio: boolean };
+  ollama: { available: boolean; baseUrl: string; defaultModel: string };
   dataDir: string;
 }
 
@@ -243,10 +139,11 @@ export type ServerEvent =
   | { type: "bots-changed" }
   | { type: "rooms-changed" }
   | { type: "memory-changed"; botId: string }
-  | { type: "project-memory-changed" }
+  | { type: "room-memory-changed"; roomId: string }
   /** A bot's Browserbase live view opened (url) or closed (null). */
   | { type: "browser-session"; botId: string; liveUrl: string | null }
-  | { type: "connections-changed" };
+  | { type: "connections-changed" }
+  | { type: "schedules-changed" };
 
 /** An app from Composio's catalog, with this install's connection state. */
 export interface ComposioApp {
@@ -265,201 +162,143 @@ export interface McpServer {
   headerNames: string[];
 }
 
+export interface GithubRepoSummary {
+  name: string;
+  full_name: string;
+  description: string | null;
+  private: boolean;
+  visibility: "public" | "private";
+  default_branch: string;
+  html_url: string;
+}
+
+export interface GithubConnectionStatus {
+  configured: boolean;
+  source: "env" | "mcp" | "composio" | "none";
+  login?: string;
+  scopes?: string[];
+  error?: string;
+}
+
 export interface ConnectionsState {
   composio: { enabled: boolean; apps: ComposioApp[]; error?: string };
   mcpServers: McpServer[];
-}
-
-export interface SkillSummary {
-  id: string;
-  name: string;
-  description: string;
-  requiredTools: string[];
-}
-
-export type ComposioDiscoveryStatus = "connected" | "disconnected" | "unavailable" | "error";
-
-export interface ComposioDiscoveredTool {
-  toolSlug: string;
-  toolkit: string;
-  description: string;
-}
-
-export interface ComposioToolDiscovery {
-  slug: string;
-  status: ComposioDiscoveryStatus;
-  message?: string;
-  tools: ComposioDiscoveredTool[];
+  github?: GithubConnectionStatus;
 }
 
 /** Something a bot can be given access to. */
 export interface ConnectionOption {
   id: string;
   name: string;
-  kind: "composio" | "mcp";
+  kind: "composio" | "mcp" | "github";
   logo?: string;
 }
 
-export type ExecutionTaskStatus =
-  | "pending"
-  | "running"
-  | "awaiting_approval"
-  | "awaiting_input"
-  | "completed"
-  | "failed"
-  | "outcome_unknown"
-  | "cancelled";
-export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
-export type PlannerMode = "ai" | "simulated";
-export type TaskCapability =
-  | "research"
-  | "writing"
-  | "planning"
-  | "analysis"
-  | "webSearch"
-  | "memory"
-  | "codeMode"
-  | "browser"
-  | "connectedApps"
-  | "askUser";
-
-export interface ExecutionTask {
-  id: string;
-  title: string;
-  description: string;
-  assignedBotId: string;
-  requiredCapabilities: TaskCapability[];
-  dependencies: string[];
-  status: ExecutionTaskStatus;
-  output?: string;
-  error?: string;
-  approvalRequest?: { conversationId: ConversationId; toolCallId: string };
-  inputRequest?: {
-    conversationId: ConversationId;
-    toolCallId: string;
-    question: string;
-    options: { label: string; description?: string }[];
-  };
-  sideEffectsPossible?: boolean;
+export interface PendingApproval {
+  conversationId: ConversationId;
+  messageId: string;
+  botId: string;
+  botName: string;
+  toolCallId: string;
+  name: string;
+  label: string;
+  detail?: string;
   createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-  retryCount: number;
-  approvalRequired: boolean;
-  collaboration?: {
-    objective: string;
-    context: string;
-    expectedOutput: string;
-    verificationOfTaskId?: string;
-    verificationStatus?: "accepted" | "needs_revision" | "inconclusive";
-  };
+  live: boolean;
 }
 
-export interface Execution {
-  id: string;
-  instruction: string;
-  summary: string;
-  plannerMode: PlannerMode;
-  plannerLabel: string;
-  status: ExecutionStatus;
-  tasks: ExecutionTask[];
-  output?: string;
-  error?: string;
-  scheduleId?: string;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-  collaboration?: {
-    roomId: string;
-    parentExecutionId?: string;
-    rootExecutionId: string;
-    depth: number;
-    delegatorBotId: string;
-    path: string[];
-    patternKey?: string;
-  };
-}
+export type ScheduleRecurrence = "once" | "interval" | "daily" | "weekly";
 
-export type WorkflowRecurrence = "once" | "daily" | "weekly";
-export type ScheduledWorkflowStatus = "active" | "paused" | "completed" | "deleted";
-export type ScheduledWorkflowRunStatus = "claimed" | "running" | "completed" | "failed" | "outcome_unknown" | "cancelled" | "skipped";
-
-export interface ScheduledWorkflowPlan {
-  instruction: string;
-  summary: string;
-  plannerMode: PlannerMode;
-  plannerLabel: string;
-  tasks: Array<{
-    id: string;
-    title: string;
-    description: string;
-    assignedBotId: string;
-    requiredCapabilities: TaskCapability[];
-    dependencies: string[];
-  }>;
-}
+export type ScheduleTarget =
+  | { kind: "dm"; botId: string }
+  | { kind: "room"; roomId: string };
 
 export interface ScheduledWorkflow {
   id: string;
   name: string;
-  recurrence: WorkflowRecurrence;
-  timeZone: string;
-  localTime: string;
-  oneTimeLocal?: string;
-  weekdays: number[];
-  status: ScheduledWorkflowStatus;
-  nextRunAt: string | null;
+  target: ScheduleTarget;
+  prompt: string;
+  recurrence: ScheduleRecurrence;
+  intervalMinutes?: number;
+  nextRunAt: string;
+  enabled: boolean;
+  maxRetries: number;
+  retryCount: number;
   lastRunAt?: string;
-  lastExecutionId?: string;
-  plan: ScheduledWorkflowPlan;
+  lastStatus?: "running" | "success" | "failed";
+  lastError?: string;
   createdAt: string;
-  updatedAt: string;
 }
 
-export interface ScheduledWorkflowRun {
+export interface ScheduleInput {
+  name: string;
+  target: ScheduleTarget;
+  prompt: string;
+  recurrence: ScheduleRecurrence;
+  intervalMinutes?: number;
+  nextRunAt: string;
+  enabled?: boolean;
+  maxRetries?: number;
+}
+
+export interface ScheduleRun {
   id: string;
-  workflowId: string;
-  occurrenceKey: string;
-  scheduledFor: string;
-  executionId?: string;
-  status: ScheduledWorkflowRunStatus;
+  scheduleId: string;
+  scheduleName: string;
+  conversationId: ConversationId;
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "success" | "failed";
+  attempt: number;
+  willRetry: boolean;
   error?: string;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-  plan: ScheduledWorkflowPlan;
+  simulated?: boolean;
+  messageIds?: string[];
 }
 
-export type CollaborationMessageType =
-  | "delegation"
-  | "delegation_rejected"
-  | "task_output"
-  | "research"
-  | "question"
-  | "answer"
-  | "verification_request"
-  | "verification_result";
-
-export interface CollaborationMessage {
+export interface SkillDefinitionSummary {
   id: string;
-  roomId: string;
-  executionId?: string;
-  taskId?: string;
-  type: CollaborationMessageType;
-  authorBotId: string;
-  recipientBotId?: string;
-  responseToMessageId?: string;
-  content: string;
-  createdAt: string;
+  name: string;
+  category: string;
+  description: string;
+  recommendedRole: string;
+  sampleInput: Record<string, unknown>;
 }
 
-export interface CollaborationTaskSpec {
+export interface SkillExecutionResult {
+  skillId: string;
+  skillName: string;
+  ok: boolean;
+  summary: string;
+  deliverable: Record<string, unknown>;
+  markdown: string;
+}
+
+export interface DelegationTaskRecord {
   id: string;
   title: string;
-  objective: string;
-  context: string;
-  expectedOutput: string;
-  assignedBotId: string;
-  dependencies: string[];
-  verificationOfTaskId?: string;
+  botId: string;
+  botName: string;
+  botHandle: string;
+  dependsOn: string[];
+  status: "pending" | "running" | "done" | "error" | "blocked" | "stopped";
+  outcome: "pending" | "running" | "completed" | "failed" | "blocked" | "stopped";
+  startedAt?: string;
+  finishedAt?: string;
+  recoveredFrom?: { botId: string; botName: string; error: string };
+  output?: string;
+  error?: string;
+  messageId?: string;
 }
+
+export interface DelegationRunRecord {
+  id: string;
+  roomId: string;
+  roomName: string;
+  requestedByBotId: string;
+  createdAt: string;
+  finishedAt?: string;
+  ok: boolean;
+  tasks: DelegationTaskRecord[];
+}
+

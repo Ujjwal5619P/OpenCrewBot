@@ -1,6 +1,6 @@
-// A scripted stand-in used when no configured model provider is available.
+// A scripted stand-in for a real model, used when NEBIUS_API_KEY is missing.
 // It streams a short reply and exercises the same paths a real model does:
-// "remember …" calls a memory tool, "search …" calls web search, "ask me …"
+// "remember …" calls the memory tool, "search …" calls web search, "ask me …"
 // asks a question card, and "open <url>" drives the browser (which asks first).
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 
@@ -43,6 +43,8 @@ function textParts(text: string): Part[] {
   ];
 }
 
+const usage = { inputTokens: 120, outputTokens: 40, totalTokens: 160 };
+
 export function createMockModel(botName: string) {
   return new MastraLanguageModelV2Mock({
     provider: "mock",
@@ -58,13 +60,14 @@ export function createMockModel(botName: string) {
         // Tool results arrive wrapped as { type, value }; show the value plainly.
         const output = (last.content as Array<{ output?: { value?: unknown } }>)?.[0]?.output;
         const value = output && typeof output === "object" && "value" in output ? output.value : output;
+        const markdown = value && typeof value === "object" && "markdown" in value ? String((value as { markdown: unknown }).markdown) : "";
         const content = value && typeof value === "object" && "content" in value ? (value as { content: unknown }).content : value;
-        const result = (typeof content === "string" ? content : JSON.stringify(content ?? "")).slice(0, 160);
+        const result = markdown || (typeof content === "string" ? content : JSON.stringify(content ?? "")).slice(0, 1200);
         return {
           stream: streamOf([
             ...start,
-            ...textParts(`Done. The tool returned: ${result}\n\n*(Mock model. The tool really ran.)*`),
-            { type: "finish", finishReason: "stop" },
+            ...textParts(`${markdown ? result : `Done. The tool returned: ${result}`}\n\n*(Simulated demo response — local Ollama is unreachable, though the tool executed locally.)*`),
+            { type: "finish", finishReason: "stop", usage },
           ]),
         };
       }
@@ -73,7 +76,7 @@ export function createMockModel(botName: string) {
         stream: streamOf([
           ...start,
           { type: "tool-call", toolCallId: `mock-${Date.now()}`, toolName, input: JSON.stringify(input) },
-          { type: "finish", finishReason: "tool-calls" },
+          { type: "finish", finishReason: "tool-calls", usage },
         ]),
       });
 
@@ -81,10 +84,8 @@ export function createMockModel(botName: string) {
       const lines = lastUserText(prompt).split("\n").filter(Boolean);
       const personLine = lines.filter((l) => l.startsWith("Person: ")).pop();
       const said = personLine ? personLine.slice("Person: ".length) : (lines.pop() ?? "");
-      const projectRemember = said.match(/(?:remember|save)\s+(?:that\s+)?(.+?)\s+(?:for|to)\s+(?:the\s+)?project\b/i);
-      if (projectRemember && tools.has("project_memory_add")) {
-        return toolCall("project_memory_add", { note: projectRemember[1] });
-      }
+      const rememberRoom = said.match(/room memory(?:\s+that)?\s+(.+)/i);
+      if (rememberRoom && tools.has("room_memory_add")) return toolCall("room_memory_add", { note: rememberRoom[1] });
       const remember = said.match(/remember (?:that )?(.+)/i);
       if (remember && tools.has("memory_add")) return toolCall("memory_add", { note: remember[1] });
       if (/\bask me\b/i.test(said) && tools.has("ask_user")) {
@@ -95,14 +96,23 @@ export function createMockModel(botName: string) {
       }
       const url = said.match(/\bopen (https?:\/\/\S+)/i);
       if (url && tools.has("browser_goto")) return toolCall("browser_goto", { url: url[1] });
+      const csvMatch = said.match(/\b((?:samples|data)\/[a-z0-9_.\-/]+\.csv)\b/i);
+      if ((csvMatch || /\b(csv|spreadsheet)\b/i.test(said)) && tools.has("read_csv")) {
+        return toolCall("read_csv", { path: csvMatch ? csvMatch[1] : "samples/meetuniversity_campaigns.csv" });
+      }
+      const skillMatch = said.match(/\b(?:run|use)\s+skill\s+([a-z0-9_-]+)/i);
+      if (skillMatch && tools.has("run_skill")) {
+        return toolCall("run_skill", { skillId: skillMatch[1] });
+      }
       const search = said.match(/(?:search|look up|find)\s+(?:for\s+)?(.+)/i);
       if (search && tools.has("web_search")) return toolCall("web_search", { query: search[1], maxResults: 3 });
 
       const reply =
-        `Hi, I'm **${botName}**, running on the *mock model* because no configured model provider is available.\n\n` +
+        `Hi, I'm **${botName}**.\n\n` +
+        `> **Simulated demo mode:** Local Ollama (\`qwen2.5:3b\` at \`127.0.0.1:11434\`) is unreachable from this cloud environment, so this is a simulated response rather than live LLM inference.\n\n` +
         `You said: "${said.slice(0, 200)}"\n\n` +
-        "Try `remember that I like short answers`, `search for Nebius Token Factory`, or `ask me something` to see tools run.";
-      return { stream: streamOf([...start, ...textParts(reply), { type: "finish", finishReason: "stop" }]) };
+        "Try `remember that I like short answers`, `ask me something`, or `open https://example.com` (for bots with Browser enabled) to test real local tools, memory, and approvals.";
+      return { stream: streamOf([...start, ...textParts(reply), { type: "finish", finishReason: "stop", usage }]) };
     }) as never,
   });
 }

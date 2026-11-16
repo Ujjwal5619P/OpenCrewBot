@@ -7,13 +7,14 @@ import { createTavilyCrawlTool, createTavilyExtractTool, createTavilySearchTool 
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { z } from "zod";
 import type { Bot, Source } from "@/lib/shared/types";
-import { appendMemory, appendProjectMemoryEntry, editMemory, projectMemoryForAgent } from "./memory-files";
+import { appendMemory, appendRoomMemory, editMemory, editRoomMemory } from "./memory-files";
 import { publish } from "./bus";
 import { keys } from "./config";
 import { mcpServerNames } from "./connectors";
-import { canAccessProjectMemory } from "./project-memory";
-import { toolsAllowedInCodeMode } from "./approval-core";
-import { reusableSkillTools } from "./skills/tools";
+import { analyzeCsvFile } from "./csv";
+import { DelegationToolInputSchema } from "./delegation";
+import { InputError } from "./errors";
+import { SKILL_IDS, listSkills, runSkill } from "./skills";
 
 export const CODE_MODE_TOOL = "execute_typescript";
 
@@ -44,44 +45,39 @@ function memoryTools(botId: string): ToolsInput {
         return result;
       },
     }),
-  };
-}
-
-function projectMemoryTools(botId: string): ToolsInput {
-  const requireProjectMemoryAccess = async () => {
-    if (!(await canAccessProjectMemory(botId))) {
-      throw new Error("This agent is not authorized to access shared project memory.");
-    }
-  };
-  return {
-    project_memory_read: createTool({
-      id: "project_memory_read",
+    room_memory_add: createTool({
+      id: "room_memory_add",
       description:
-        "Read shared project memory. This tool is available only to agents explicitly authorized by the user. Agent-authored entries are marked unverified.",
-      inputSchema: z.object({}),
-      execute: async () => {
-        await requireProjectMemoryAccess();
-        return projectMemoryForAgent();
+        "Save a shared decision or fact to the current group room's shared MEMORY.md so all room members can see it. Only works inside a group room.",
+      inputSchema: z.object({
+        note: z.string().min(1).describe("The shared decision or fact, as one concise sentence."),
+        section: z.string().optional().describe("Optional section heading, e.g. 'Decisions' or 'Target Audience'."),
+      }),
+      execute: async ({ note, section }, ctx) => {
+        const conversationId = ctx?.requestContext?.get("conversationId");
+        if (typeof conversationId !== "string" || !conversationId.startsWith("room:")) {
+          throw new InputError("room_memory_add only works inside a group room; use memory_add for your personal MEMORY.md.");
+        }
+        const roomId = conversationId.slice("room:".length);
+        appendRoomMemory(roomId, note, section);
+        publish({ type: "room-memory-changed", roomId });
+        return { saved: true, roomId };
       },
     }),
-    project_memory_add: createTool({
-      id: "project_memory_add",
+    room_memory_edit: createTool({
+      id: "room_memory_edit",
       description:
-        "Add one durable note to shared project memory. Available only to explicitly authorized agents. Your entry is always attributed to you and marked unverified; never store secrets.",
-      inputSchema: z.object({
-        note: z.string().trim().min(1).max(4_000),
-        section: z.string().trim().max(80).optional(),
-      }),
-      execute: async ({ note, section }) => {
-        await requireProjectMemoryAccess();
-        appendProjectMemoryEntry({
-          note,
-          section,
-          source: { type: "agent", botId },
-          confidence: "unverified",
-        });
-        publish({ type: "project-memory-changed" });
-        return { saved: true, provenance: `agent ${botId}; unverified` };
+        "Fix or remove a line in the current group room's shared MEMORY.md. `find` must match the exact text once; empty `replace` deletes it.",
+      inputSchema: z.object({ find: z.string().min(1), replace: z.string() }),
+      execute: async ({ find, replace }, ctx) => {
+        const conversationId = ctx?.requestContext?.get("conversationId");
+        if (typeof conversationId !== "string" || !conversationId.startsWith("room:")) {
+          throw new InputError("room_memory_edit only works inside a group room.");
+        }
+        const roomId = conversationId.slice("room:".length);
+        const result = editRoomMemory(roomId, find, replace);
+        if (result.ok) publish({ type: "room-memory-changed", roomId });
+        return result;
       },
     }),
   };
@@ -96,53 +92,6 @@ function webTools(): ToolsInput {
   };
 }
 
-function collaborationTools(botId: string): ToolsInput {
-  return {
-    delegate_room_work: createTool({
-      id: "delegate_room_work",
-      description:
-        "Delegate structured subtasks to room members. Each task must include its objective, context, expected output, assigned room-member bot ID, and dependencies. Independent tasks may run in parallel. For a verification task, set verificationOfTaskId and depend on the task being reviewed. Delegated bots keep their own approval permissions.",
-      inputSchema: z.object({
-        tasks: z.array(
-          z.object({
-            id: z.string().describe("Unique short ID within this delegation."),
-            title: z.string(),
-            objective: z.string(),
-            context: z.string(),
-            expectedOutput: z.string(),
-            assignedBotId: z.string().describe("ID, not handle, of a room member."),
-            dependencies: z.array(z.string()),
-            verificationOfTaskId: z.string().optional(),
-          }),
-        ),
-      }),
-      execute: async (input, context) => {
-        const threadId = context.agent?.threadId;
-        if (!threadId) return { error: "Delegation requires an active room task." };
-        const collaboration = await import("./collaboration");
-        return collaboration.delegateRoomWork(botId, threadId, input, context.abortSignal);
-      },
-    }),
-    room_collaborate: createTool({
-      id: "room_collaborate",
-      description:
-        "Share research or exchange a question and answer with a room member. Use research to preserve findings; use question with a recipientBotId; answer must reference the question's messageId.",
-      inputSchema: z.object({
-        type: z.enum(["research", "question", "answer"]),
-        content: z.string(),
-        recipientBotId: z.string().optional(),
-        responseToMessageId: z.string().optional(),
-      }),
-      execute: async (input, context) => {
-        const threadId = context.agent?.threadId;
-        if (!threadId) return { error: "Room messages require an active room task." };
-        const collaboration = await import("./collaboration");
-        return collaboration.sendRoomCollaborationMessage(botId, threadId, input, context.abortSignal);
-      },
-    }),
-  };
-}
-
 export interface BotToolset {
   tools: ToolsInput;
   /** Extra prompt text the tools need (Code Mode's function stubs). */
@@ -151,56 +100,75 @@ export interface BotToolset {
   capabilities: string[];
 }
 
-export function buildTools(
-  bot: Bot,
-  connectorToolNames: ReadonlySet<string> = new Set(),
-  sharedProjectMemoryAuthorized = false,
-): BotToolset {
+export function buildTools(bot: Bot): BotToolset {
   const tools: ToolsInput = {};
   const instructions: string[] = [];
   const capabilities: string[] = [];
-  Object.assign(tools, collaborationTools(bot.id));
-  capabilities.push(
-    "In group rooms, delegate bounded tasks to room members with delegate_room_work and share research or ask/answer teammates with room_collaborate. These tools are unavailable in direct-message contexts.",
-  );
-  // Do not expose shared project-memory tools to the model unless the user has
-  // explicitly granted this exact bot access. The execute-time guard remains
-  // in place as defence in depth.
-  if (sharedProjectMemoryAuthorized) {
-    Object.assign(tools, projectMemoryTools(bot.id));
-    capabilities.push("You are explicitly authorized to use project_memory_read and project_memory_add for shared project notes. Your own MEMORY.md remains private; agent-added shared notes are marked unverified.");
-  }
 
   if (bot.tools.webSearch && keys.tavily()) {
     Object.assign(tools, webTools());
     capabilities.push("Search the web (web_search), read pages (read_page) and crawl sites (crawl_site). Cite the URLs you used.");
   } else if (bot.tools.webSearch) {
-    capabilities.push("Web search is switched on for you, but no Tavily key is set yet, so you can't search right now. Say so if asked.");
+    capabilities.push("Web search is enabled, but Tavily is not configured (TAVILY_API_KEY is not set), so live web search is unavailable.");
   }
   if (bot.tools.memory) {
     Object.assign(tools, memoryTools(bot.id));
   }
-  const availableToolNames = new Set([...connectorToolNames, ...Object.keys(tools)]);
-  if (bot.tools.codeMode) availableToolNames.add(CODE_MODE_TOOL);
-  Object.assign(tools, reusableSkillTools(bot.skillIds ?? [], availableToolNames));
-  capabilities.push(
-    "Discover reusable skills with skill_discover and load assigned, compatible guidance with skill_load. Skills do not add tools, connections, credentials, or permissions.",
-  );
+  tools.delegate_tasks = createTool({
+    id: "delegate_tasks",
+    description:
+      "Delegate 1-20 structured tasks to valid members of the current group room (supports parallel waves and dependsOn). Always include a non-empty `tasks` array; `id` is auto-generated if omitted.",
+    inputSchema: DelegationToolInputSchema,
+    execute: async (input, ctx) => {
+      const conversationId = ctx?.requestContext?.get("conversationId");
+      if (typeof conversationId !== "string" || !conversationId.startsWith("room:")) {
+        throw new InputError("delegate_tasks can only be used inside a group room.");
+      }
+      const roomId = conversationId.slice("room:".length);
+      const { delegateInRoom } = await import("./rooms");
+      const report = await delegateInRoom(roomId, bot, input);
+      if (!report.ok && report.summary.done === 0) {
+        throw new InputError(report.errorSummary || "Delegation failed: no tasks completed.");
+      }
+      return report;
+    },
+  });
+  tools.list_skills = createTool({
+    id: "list_skills",
+    description: "List the 8 reusable business and engineering skills available in this workspace.",
+    inputSchema: z.object({}),
+    execute: async () => ({ skills: listSkills() }),
+  });
+  tools.run_skill = createTool({
+    id: "run_skill",
+    description: `Execute one of the 8 reusable skills (${SKILL_IDS.join(", ")}) with structured input. Requires \`skillId\`; never use run_skill for GitHub operations.`,
+    inputSchema: z
+      .object({
+        skillId: z.enum(SKILL_IDS).describe(`Required skill ID. Must be one of: ${SKILL_IDS.join(", ")}`),
+        input: z.record(z.string(), z.unknown()).optional().describe("Structured parameters for the skill."),
+      })
+      .strict(),
+    execute: async ({ skillId, input }) => await runSkill(skillId, input),
+  });
   if (bot.tools.codeMode) {
+    tools.read_csv = createTool({
+      id: "read_csv",
+      description:
+        "Read and dynamically analyze a workspace CSV file (under samples/ or data/, e.g. samples/meetuniversity_campaigns.csv or uploaded data/uploads/*.csv) for revenue, cost, profit, margins, and monthly trends.",
+      inputSchema: z.object({
+        path: z.string().trim().default("samples/meetuniversity_campaigns.csv").describe("Relative path under samples/ or data/."),
+      }),
+      execute: async ({ path }) => analyzeCsvFile(path),
+    });
     // The program runs in a QuickJS (WebAssembly) isolate with no filesystem or
     // network; its only reach is the tools passed here, bridged back to the host.
-    const reachable = toolsAllowedInCodeMode(
-      tools,
-      bot.approval,
-      bot.approvalPermissions ?? [],
-      toolCategory,
-    ) as ToolsInput;
+    const reachable = { ...tools };
     const codeMode = createCodeMode({ tools: reachable, timeout: 60_000 }, new QuickJsCodeModeTransport({ memoryLimitMb: 128 }));
     tools[CODE_MODE_TOOL] = codeMode.tool;
     instructions.push(codeMode.instructions);
     capabilities.push(
-  `Run TypeScript with ${CODE_MODE_TOOL} when a question needs several tool calls, filtering, or exact arithmetic; call available tools from inside it with Promise.all. IMPORTANT: Never call COMPOSIO_* tools from inside ${CODE_MODE_TOOL}. For connected apps such as GitHub, call COMPOSIO_SEARCH_TOOLS directly, then call COMPOSIO_MULTI_EXECUTE_TOOL directly with the discovered action. These calls must be made directly by the agent so approval checks can work.`,
-);
+      `Read workspace CSV spreadsheets with read_csv and run TypeScript with ${CODE_MODE_TOOL} for filtering or exact arithmetic; call the other tools from inside it with Promise.all.`,
+    );
   }
   if (bot.tools.browser && keys.browserbase()) {
     capabilities.push(
@@ -214,20 +182,21 @@ export function buildTools(
 
 /** Which approval policy a tool falls under. Read and memory tools never ask;
  * acting in the browser does, unless the bot has Full access. */
+/** MCP tool names that only look things up. A heuristic over the tool's own name:
+ * anything that doesn't read clearly as a lookup asks first. */
+const READ_ONLY_VERB = /^(get|list|search|read|fetch|find|view|show|describe|lookup|query)(_|$)/;
+
 export function toolCategory(toolName: string): ToolCategory | null {
-  if (["skill_discover", "skill_load", "github_list_repositories"].includes(toolName)) return "read";
-  if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
-  if (toolName === "project_memory_read") return "read";
-  if (toolName === "project_memory_add") return "edit";
-  if (["delegate_room_work", "room_collaborate"].includes(toolName)) return "edit";
+  if (["web_search", "read_page", "crawl_site", "ask_user", "read_csv", "list_skills", "run_skill", "github_repos_list", CODE_MODE_TOOL].includes(toolName)) return "read";
   // Composio: looking up actions is free; running them ("multi execute", the remote workbench) asks.
   if (toolName.startsWith("COMPOSIO_")) {
     return /SEARCH_TOOLS|GET_TOOL_SCHEMAS|MANAGE_CONNECTIONS/.test(toolName) ? "read" : "mcp";
   }
-  // MCP tool names and descriptions are server-controlled, so never infer that
-  // an MCP action is read-only from its name.
-  if (toolName.startsWith("mcp_")) return "mcp";
-  if (toolName.startsWith("memory_")) return "edit";
+  if (toolName.startsWith("mcp_")) {
+    const action = toolName.split("_").slice(2).join("_");
+    return READ_ONLY_VERB.test(action) ? "read" : "mcp";
+  }
+  if (toolName.startsWith("memory_") || toolName.startsWith("room_memory_")) return "edit";
   if (toolName.startsWith("browser_")) {
     return /snapshot|screenshot|scroll|wait|tabs|close|get_|read|extract|console/.test(toolName) ? "read" : "execute";
   }
@@ -268,8 +237,6 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
     return { label: `${mcpServerNames.get(id) ?? "MCP"}: ${rest.join(" ")}` };
   }
   switch (name) {
-    case "github_list_repositories":
-      return { label: "Listed GitHub repositories" };
     case "web_search":
       return { label: "Searched the web", detail: String(a.query ?? "") };
     case "read_page": {
@@ -282,18 +249,26 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
       return { label: "Saved to memory", detail: String(a.note ?? "") };
     case "memory_edit":
       return { label: "Updated memory" };
-    case "project_memory_read":
-      return { label: "Read shared project memory" };
-    case "project_memory_add":
-      return { label: "Added to project memory", detail: String(a.note ?? "") };
+    case "room_memory_add":
+      return { label: "Saved to room memory", detail: String(a.note ?? "") };
+    case "room_memory_edit":
+      return { label: "Updated room memory" };
     case CODE_MODE_TOOL:
       return { label: "Ran code" };
     case "ask_user":
       return { label: "Asked you" };
-    case "delegate_room_work":
-      return { label: "Delegated room tasks" };
-    case "room_collaborate":
-      return { label: "Shared with room" };
+    case "delegate_tasks": {
+      const count = Array.isArray(a.tasks) ? a.tasks.length : 0;
+      return { label: "Delegated tasks", detail: count ? `${count} ${count === 1 ? "task" : "tasks"}` : undefined };
+    }
+    case "read_csv":
+      return { label: "Analyzed CSV", detail: String(a.path ?? "samples/meetuniversity_campaigns.csv") };
+    case "list_skills":
+      return { label: "Listed skills" };
+    case "run_skill":
+      return { label: "Ran skill", detail: String(a.skillId ?? "") };
+    case "github_repos_list":
+      return { label: "Listed GitHub repositories", detail: a.visibility ? `${String(a.visibility)} · page ${String(a.page ?? 1)}` : undefined };
     default:
       if (name.startsWith("browser_")) {
         const action = name.slice("browser_".length).replace(/_/g, " ");
@@ -316,6 +291,7 @@ export function toolPreview(result: unknown): string | undefined {
   if (result === undefined || result === null) return undefined;
   if (typeof result === "string") return result.slice(0, 400);
   const r = result as Record<string, unknown>;
+  if (typeof r.errorSummary === "string" && r.errorSummary) return r.errorSummary.slice(0, 400);
   if (typeof r.answer === "string" && r.answer) return r.answer.slice(0, 400);
   if (typeof r.error === "string") return r.error.slice(0, 400);
   if (typeof r.reason === "string") return r.reason.slice(0, 400);

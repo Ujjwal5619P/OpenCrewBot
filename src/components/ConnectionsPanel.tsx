@@ -1,15 +1,13 @@
 "use client";
 
 import clsx from "clsx";
-import { ArrowUpRight, Check, Plug, Search, Server, Trash2 } from "lucide-react";
+import { ArrowUpRight, Check, GitBranch, Plug, Search, Server, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/client/api";
 import { useConnections } from "@/lib/client/use-connections";
-import type { ComposioApp, ComposioToolDiscovery } from "@/lib/shared/types";
+import type { ComposioApp } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { Button, Drawer, Field, inputClass } from "./ui";
-
-const DISCOVERY_APPS = new Set(["github", "gmail", "slack"]);
 
 function AppLogo({ app, size = 28 }: { app: { name: string; logo?: string }; size?: number }) {
   return app.logo ? (
@@ -26,21 +24,7 @@ function AppLogo({ app, size = 28 }: { app: { name: string; logo?: string }; siz
 function AppRow({ app, onChanged }: { app: ComposioApp; onChanged: () => void }) {
   const { toast } = useApp();
   const [busy, setBusy] = useState(false);
-  const [query, setQuery] = useState("");
-  const [discovery, setDiscovery] = useState<ComposioToolDiscovery | null>(null);
-  const [discovering, setDiscovering] = useState(false);
-
-  const discoverTools = async () => {
-    setDiscovering(true);
-    try {
-      const { discovery: result } = await api.discoverComposioTools(app.slug, query);
-      setDiscovery(result);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "Couldn't discover Composio tools.");
-    } finally {
-      setDiscovering(false);
-    }
-  };
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const connect = async () => {
     setBusy(true);
@@ -55,10 +39,10 @@ function AppRow({ app, onChanged }: { app: ComposioApp; onChanged: () => void })
   };
 
   const disconnect = async () => {
-    if (!window.confirm(`Disconnect ${app.name}? Bots lose access to it until you connect it again.`)) return;
     setBusy(true);
     try {
       await api.disconnectApp(app.slug);
+      setConfirmDisconnect(false);
       toast(`${app.name} disconnected.`);
       onChanged();
     } catch (error) {
@@ -69,69 +53,35 @@ function AppRow({ app, onChanged }: { app: ComposioApp; onChanged: () => void })
   };
 
   return (
-    <li className="px-4 py-3">
-      <div className="flex items-center gap-3">
-        <AppLogo app={app} />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[14px] font-medium">{app.name}</span>
-          <span className={clsx("flex items-center gap-1 text-[12px]", app.connected ? "text-ok" : "text-mute")}>
-            {app.connected ? <><Check size={12} /> Connected</> : "Not connected"}
+    <li className="flex items-center gap-3 px-4 py-3">
+      <AppLogo app={app} />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[14px] font-medium">{app.name}</span>
+        {app.connected && (
+          <span className="flex items-center gap-1 text-[12px] text-ok">
+            <Check size={12} /> Connected
           </span>
-        </span>
-        {app.connected ? (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={disconnect}>
+        )}
+      </span>
+      {app.connected ? (
+        confirmDisconnect ? (
+          <span className="flex items-center gap-1.5">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmDisconnect(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="danger" disabled={busy} onClick={disconnect}>
+              Disconnect
+            </Button>
+          </span>
+        ) : (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmDisconnect(true)}>
             Disconnect
           </Button>
-        ) : (
-          <Button size="sm" variant="secondary" disabled={busy} onClick={connect}>
-            {busy ? "Opening…" : "Connect"}
-          </Button>
-        )}
-      </div>
-      {DISCOVERY_APPS.has(app.slug) && (
-        <div className="mt-3 rounded-xl bg-raised-2 p-3">
-          <p className="mb-2 text-[12px] font-medium text-mute">Discover {app.name} actions</p>
-          <div className="flex gap-2">
-            <input
-              className={inputClass}
-              value={query}
-              maxLength={200}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Describe an action, e.g. search repositories"
-              aria-label={`Describe a ${app.name} action to find`}
-            />
-            <Button size="sm" variant="secondary" disabled={discovering || query.trim().length < 2} onClick={discoverTools}>
-              {discovering ? "Searching…" : "Discover"}
-            </Button>
-          </div>
-          {discovery && (
-            <div className="mt-2 text-[12px]">
-              <p className={clsx(discovery.status === "connected" ? "text-ok" : discovery.status === "error" ? "text-danger" : "text-warn")}>
-                {discovery.status === "connected"
-                  ? "Connected; discovered tool actions are available to configured bots."
-                  : discovery.status === "disconnected"
-                    ? "Not connected; discovered actions cannot execute yet."
-                    : discovery.status === "unavailable"
-                      ? "Unavailable; Composio is not configured."
-                      : "Discovery failed."}
-                {discovery.message ? ` ${discovery.message}` : ""}
-              </p>
-              {discovery.tools.length > 0 ? (
-                <ul className="mt-2 space-y-2">
-                  {discovery.tools.map((tool) => (
-                    <li key={tool.toolSlug}>
-                      <code className="font-mono">{tool.toolSlug}</code>
-                      {tool.description && <span className="ml-1 text-faint">{tool.description}</span>}
-                    </li>
-                  ))}
-                </ul>
-              ) : discovery.status !== "error" && discovery.status !== "unavailable" ? (
-                <p className="mt-2 text-faint">No matching actions found.</p>
-              ) : null}
-              <p className="mt-2 text-faint">Discovery does not run actions. Bot actions still pass through the existing approval policy.</p>
-            </div>
-          )}
-        </div>
+        )
+      ) : (
+        <Button size="sm" variant="secondary" disabled={busy} onClick={connect}>
+          {busy ? "Opening…" : "Connect"}
+        </Button>
       )}
     </li>
   );
@@ -211,6 +161,7 @@ export function ConnectionsPanel({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<ComposioApp[] | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
 
   // Search Composio's whole catalog, debounced.
   useEffect(() => {
@@ -237,10 +188,10 @@ export function ConnectionsPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const remove = async (id: string, name: string) => {
-    if (!window.confirm(`Remove ${name}? Bots that use it lose access.`)) return;
+  const remove = async (id: string) => {
     try {
       await api.removeMcpServer(id);
+      setConfirmRemoveId(null);
       reload();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Couldn't remove it.");
@@ -255,10 +206,37 @@ export function ConnectionsPanel({ onClose }: { onClose: () => void }) {
         Connect apps once, then choose which bots can use each one in the bot&apos;s Details. Actions that change something ask you first, unless the bot has full
         access.
       </p>
-      {state.status?.mock && (
-        <p className="mt-3 rounded-xl bg-warn-soft px-3.5 py-2.5 text-[12px] text-warn">
-          Mock model mode: only agent replies are simulated. GitHub, Gmail, Slack, and other integrations are never simulated; actions require a real Composio connection.
-        </p>
+
+      {data?.github && (
+        <section className="mt-5">
+          <h3 className="mb-2 flex items-center gap-1.5 text-[12.5px] font-medium text-mute">
+            <GitBranch size={13} /> GitHub repository access
+          </h3>
+          <div className="rounded-2xl bg-raised px-4 py-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[14px] font-medium">
+                {data.github.configured
+                  ? `Connected via ${data.github.source === "mcp" ? "MCP server token" : data.github.source === "composio" ? "Composio OAuth" : "GITHUB_TOKEN env"}`
+                  : "GitHub repositories"}
+              </p>
+              <span
+                className={clsx(
+                  "rounded-full px-2.5 py-0.5 text-[11.5px]",
+                  data.github.configured ? "bg-ok/15 text-ok" : "bg-raised-2 text-faint",
+                )}
+              >
+                {data.github.configured ? (data.github.login ? `@${data.github.login}` : "Connected") : "Not configured"}
+              </span>
+            </div>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-mute">
+              {data.github.error
+                ? data.github.error
+                : data.github.configured
+                  ? `Authenticated bots with GitHub enabled can call github_repos_list cleanly${data.github.scopes?.length ? ` (scopes: ${data.github.scopes.join(", ")})` : ""}.`
+                  : "Not connected yet. Add the GitHub MCP preset below with a Personal Access Token, connect GitHub via Composio, or set GITHUB_TOKEN in .env — then enable GitHub in a bot's Details."}
+            </p>
+          </div>
+        </section>
       )}
 
       <section className="mt-6">
@@ -276,10 +254,12 @@ export function ConnectionsPanel({ onClose }: { onClose: () => void }) {
 
         {data && !data.composio.enabled && (
           <div className="rounded-2xl bg-raised px-4 py-4">
-            <p className="text-[14px] font-medium">GitHub, Gmail and Slack are unavailable</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[14px] font-medium">Connect Slack, GitHub, Gmail and 1,000+ apps</p>
+              <span className="rounded-full bg-raised-2 px-2.5 py-0.5 text-[11.5px] text-faint">Not configured</span>
+            </div>
             <p className="mt-1 text-[13px] leading-relaxed text-mute">
-              Add <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">COMPOSIO_API_KEY</code> to <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">.env</code> and
-              restart. Composio handles each app&apos;s sign-in. These integrations are unavailable, not mocked.
+              Optional: set <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">COMPOSIO_API_KEY</code> in <code className="rounded-md bg-raised-2 px-1 font-mono text-[12px]">.env</code> to enable Composio OAuth apps. You can still add direct MCP servers below without any key.
             </p>
           </div>
         )}
@@ -328,9 +308,20 @@ export function ConnectionsPanel({ onClose }: { onClose: () => void }) {
                 <Button size="sm" variant="ghost" disabled={testing === s.id} onClick={() => test(s.id, s.name)}>
                   {testing === s.id ? "Testing…" : "Test"}
                 </Button>
-                <button aria-label={`Remove ${s.name}`} onClick={() => remove(s.id, s.name)} className="rounded-full p-2 text-faint hover:bg-raised-2 hover:text-danger">
-                  <Trash2 size={15} />
-                </button>
+                {confirmRemoveId === s.id ? (
+                  <span className="flex items-center gap-1">
+                    <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveId(null)}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" variant="danger" onClick={() => remove(s.id)}>
+                      Remove
+                    </Button>
+                  </span>
+                ) : (
+                  <button aria-label={`Remove ${s.name}`} onClick={() => setConfirmRemoveId(s.id)} className="rounded-full p-2 text-faint hover:bg-raised-2 hover:text-danger">
+                    <Trash2 size={15} />
+                  </button>
+                )}
               </li>
             ))}
           </ul>
